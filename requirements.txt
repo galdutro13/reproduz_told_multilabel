@@ -1,0 +1,14 @@
+# Índice extra para pacotes de CPU do PyTorch
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Pacotes do PyTorch (CPU)
+torch
+torchvision
+torchaudio
+
+# Demais dependências
+transformers==4.48.0
+intel_extension_for_pytorch
+simpletransformers
+matplotlib
+iterative-stratification
