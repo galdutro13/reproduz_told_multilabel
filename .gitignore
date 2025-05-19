@@ -1,1 +1,9 @@
 /.venv
+/cache_bert
+/outputs_bert
+/runs
+/outputs 
+
+split_test.csv
+split_train.csv
+split_val.csv

@@ -7,6 +7,7 @@ PyTorch ≥2.1, transformers 4.48.x, simpletransformers 0.64.x, IPEX 2.7.x.
 # ---------- 0 | Ambiente -------------------------------------------------
 import os, multiprocessing, logging, warnings, textwrap, sys
 import numpy as np
+import argparse
 
 N_CPU = max(1, multiprocessing.cpu_count() - 1)
 os.environ.update({
@@ -176,7 +177,7 @@ def make_model():
     if hasattr(torch, "compile"):
         try:
             model.model = torch.compile(
-                model.model, backend="ipex", dynamic=True, fullgraph=False
+                model.model, backend="ipex", dynamic=False, fullgraph=False
             )
             print("🛠️  torch.compile ativado.")
         except Exception as e:
@@ -254,21 +255,79 @@ def predict(model, textos):
         lbls = [LABELS[i] for i, f in enumerate(p) if f]
         print(f"\n{textwrap.shorten(t, 80)}\n→ {', '.join(lbls) or 'Nenhuma'}")
 
+# ---------- Utilidades para salvar/carregar splits ------------------------
+def save_split(df, name):
+    df.to_csv(f"split_{name}.csv", index=False)
+
+def load_split(name):
+    import pandas as pd
+    import ast
+    path = f"split_{name}.csv"
+    if not os.path.exists(path):
+        return None
+    df = pd.read_csv(path)
+    if 'labels' in df.columns:
+        df['labels'] = df['labels'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    return df
+
+# ---------- Main com argparse ---------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description="Fine-tuning BERT multi-label (ToLD-BR) com splits persistentes.\n\nExemplos:\n  python train_gregor_samsa.py --train\n  python train_gregor_samsa.py --test\n  python train_gregor_samsa.py --train --validate\n",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument('--train', action='store_true', help='Treina o modelo (gera splits se necessário)')
+    parser.add_argument('--test', action='store_true', help='Testa o modelo salvo')
+    parser.add_argument('--validate', action='store_true', help='Usa validação durante o treino')
+    args = parser.parse_args()
+
+    if not (args.train or args.test):
+        print("\n⚠️  Nenhum parâmetro passado! Use --train, --test ou ambos.\n")
+        parser.print_help()
+        return
+
+    # Carregar ou gerar splits
+    train_df = load_split('train')
+    val_df   = load_split('val')
+    test_df  = load_split('test')
+    if train_df is None or test_df is None or (args.validate and val_df is None):
+        print("Gerando splits e salvando em disco…")
+        full_data = load_dataset(DATASET_PATH)
+        train_df, val_df, test_df = split_stratified_holdout(full_data)
+        save_split(train_df, 'train')
+        save_split(val_df,   'val')
+        save_split(test_df,  'test')
+    else:
+        print("Splits carregados do disco.")
+
+    model = None
+    if args.train:
+        if args.validate:
+            model = train_and_eval(train_df, val_df)
+        else:
+            # Treina sem validação
+            model = make_model()
+            print("Treinando …")
+            global_step, training_details = model.train_model(train_df)
+            print("Treino concluído.")
+        # Após treino, sempre testa
+        print("\nAvaliação no conjunto de teste:")
+        result, model_outputs, wrong_preds = model.eval_model(test_df)
+        for k, v in result.items():
+            print(f"  {k}: {v:.4f}")
+    if args.test and not args.train:
+        # Só testar (carrega modelo salvo)
+        model_dir = 'outputs_bert/'
+        model_files = [os.path.join(model_dir, f) for f in ['pytorch_model.bin', 'config.json']]
+        if not (os.path.isdir(model_dir) and all(os.path.isfile(f) for f in model_files)):
+            print("\n❌ Modelo não encontrado em 'outputs_bert/'.\nTreine o modelo primeiro usando --train antes de testar.")
+            return
+        model = make_model()
+        model.model = model.model.from_pretrained(model_dir.rstrip('/'))
+        print("\nAvaliação no conjunto de teste:")
+        result, model_outputs, wrong_preds = model.eval_model(test_df)
+        for k, v in result.items():
+            print(f"  {k}: {v:.4f}")
+
 if __name__ == "__main__":
-    full_data = load_dataset(DATASET_PATH)
-    train_df, val_df, test_df = split_stratified_holdout(full_data)
-
-    mdl = train_and_eval(train_df, val_df)
-
-    # Avaliação final no conjunto de teste
-    print("\nAvaliação no conjunto de teste:")
-    result, model_outputs, wrong_preds = mdl.eval_model(test_df)
-    for k, v in result.items():
-        print(f"  {k}: {v:.4f}")
-
-    # Demonstração de inferência
-    predict(mdl, [
-        "Esse comentário é neutro e cordial.",
-        "Seu lixo, passa longe!",
-        "Mulheres não deviam opinar nisso.",
-    ])
+    main()
