@@ -34,7 +34,8 @@ warnings.filterwarnings("ignore", message=".*ipex_MKLSGEMM.*")
 
 # ---------- 1 | Constantes -----------------------------------------------
 DATASET_PATH = "ToLD-BR.csv"
-MODEL_NAME   = "bert-base-multilingual-cased"
+MODEL_DIR    = 'outputs_bert/'
+MODEL_NAME   = "pablocosta/bertabaporu-base-uncased"
 LABELS       = ["homophobia","obscene","insult","racism","misogyny","xenophobia"]
 NUM_LABELS   = len(LABELS)
 SEED         = 42
@@ -129,7 +130,7 @@ def split_stratified_holdout(df: pd.DataFrame,
     return d_train, d_val, d_test
 
 # ---------- 3 | Modelo ----------------------------------------------------
-def make_model():
+def make_model(evaluate_during_training: bool = True):
     args = MultiLabelClassificationArgs()
     args.manual_seed = SEED
     args.process_count = 1
@@ -140,13 +141,16 @@ def make_model():
     args.num_labels = NUM_LABELS
     args.use_cuda   = False
     args.overwrite_output_dir = True
-    args.evaluate_during_training = True
+    args.evaluate_during_training = evaluate_during_training
     args.evaluate_during_training_verbose = True
     args.save_eval_checkpoints = True
     args.evaluate_during_training_steps = 150
     args.logging_steps = 150
     args.tensorboard_dir = "runs/"
     args.num_train_epochs = 3
+    args.max_seq_length = 80
+    args.do_lower_case = True
+    
 
     model = MultiLabelClassificationModel(
         "bert", MODEL_NAME, num_labels=NUM_LABELS, args=args, use_cuda=False
@@ -236,8 +240,8 @@ def plot_train_curves(training_details, save_path="outputs_bert/loss_f1_vs_step.
     plt.close()
     print(f"✅  Curva Loss/F1 salva em: {save_path}")
 
-def train_and_eval(df_train, df_val):
-    model = make_model()
+def train(df_train, df_val, evaluate_during_training: bool = False):
+    model = make_model(evaluate_during_training=evaluate_during_training)
     métricas = {"macro_f1": macro_f1}
 
     print("Treinando …")
@@ -245,6 +249,10 @@ def train_and_eval(df_train, df_val):
         df_train, eval_df=df_val, **métricas
     )                                         # ← capturamos training_details
     print("Treino concluído.")
+    return model,training_details
+
+def train_and_eval(df_train, df_val):
+    model, training_details = train(df_train, df_val, True)
 
     plot_train_curves(training_details, "outputs_bert/lr_vs_loss.png")
     return model
@@ -272,7 +280,7 @@ def load_split(name):
     return df
 
 # ---------- Função para plotar matrizes de confusão ------------------------
-def plot_multilabel_confusion(y_true, y_pred, labels, save_path="outputs/best_model/confusion_all_labels.png"):
+def plot_multilabel_confusion(y_true, y_pred, labels, save_path=f"{MODEL_DIR}confusion_all_labels.png"):
     from sklearn.metrics import multilabel_confusion_matrix
     import seaborn as sns
     import matplotlib.pyplot as plt
@@ -306,6 +314,32 @@ def plot_multilabel_confusion(y_true, y_pred, labels, save_path="outputs/best_mo
     plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"✅ Matrizes de confusão salvas em: {save_path}")
+
+# ---------- Função para plotar heatmap de coocorrência ------------------------
+def plot_cooccurrence_heatmap(y_true, y_pred, labels, save_path=f"{MODEL_DIR}cooccurrence_heatmap.png"):
+    import numpy as np
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    n_labels = len(labels)
+    # Matriz de coocorrência: real (linhas) × predito (colunas)
+    cooc = np.zeros((n_labels, n_labels), dtype=int)
+    for i in range(len(y_true)):
+        true_idx = np.where(y_true[i])[0]
+        pred_idx = np.where(y_pred[i])[0]
+        for t in true_idx:
+            for p in pred_idx:
+                cooc[t, p] += 1
+    plt.figure(figsize=(2+n_labels, 2+n_labels))
+    ax = sns.heatmap(cooc, annot=True, fmt='d', cmap='YlGnBu', xticklabels=labels, yticklabels=labels)
+    ax.set_xlabel('Rótulo Predito', fontsize=12)
+    ax.set_ylabel('Rótulo Real', fontsize=12)
+    plt.title('Heatmap de Coocorrência Predita × Real', fontsize=16)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"✅ Heatmap de coocorrência salvo em: {save_path}")
 
 # ---------- Main com argparse ---------------------------------------------
 def main():
@@ -343,10 +377,7 @@ def main():
             model = train_and_eval(train_df, val_df)
         else:
             # Treina sem validação
-            model = make_model()
-            print("Treinando …")
-            global_step, training_details = model.train_model(train_df)
-            print("Treino concluído.")
+            model, _ = train(train_df, val_df)
         # Após treino, sempre testa
         print("\nAvaliação no conjunto de teste:")
         result, model_outputs, wrong_preds = model.eval_model(test_df)
@@ -356,9 +387,10 @@ def main():
         y_true = list(test_df['labels'])
         y_pred = (np.array(model_outputs) >= 0.5).astype(int) if isinstance(model_outputs, np.ndarray) or (hasattr(model_outputs, 'shape') and model_outputs is not None) else np.array(model_outputs)
         plot_multilabel_confusion(y_true, y_pred, LABELS)
+        plot_cooccurrence_heatmap(y_true, y_pred, LABELS)
     if args.test and not args.train:
         # Só testar (carrega modelo salvo)
-        model_dir = 'outputs/best_model/'
+        model_dir = MODEL_DIR
         model_files = [os.path.join(model_dir, f) for f in ['config.json', 'model.safetensors']]
         if not (os.path.isdir(model_dir) and all(os.path.isfile(f) for f in model_files)):
             print("\n❌ Modelo não encontrado em 'outputs_bert/'.\nTreine o modelo primeiro usando --train antes de testar.")
@@ -375,6 +407,7 @@ def main():
         y_true = list(test_df['labels'])
         y_pred = (np.array(model_outputs) >= 0.5).astype(int) if isinstance(model_outputs, np.ndarray) or (hasattr(model_outputs, 'shape') and model_outputs is not None) else np.array(model_outputs)
         plot_multilabel_confusion(y_true, y_pred, LABELS)
+        plot_cooccurrence_heatmap(y_true, y_pred, LABELS)
 
 if __name__ == "__main__":
     main()
