@@ -143,9 +143,10 @@ def make_model():
     args.evaluate_during_training = True
     args.evaluate_during_training_verbose = True
     args.save_eval_checkpoints = True
-    args.evaluate_during_training_steps = 50
-    args.logging_steps = 50
+    args.evaluate_during_training_steps = 150
+    args.logging_steps = 150
     args.tensorboard_dir = "runs/"
+    args.num_train_epochs = 3
 
     model = MultiLabelClassificationModel(
         "bert", MODEL_NAME, num_labels=NUM_LABELS, args=args, use_cuda=False
@@ -270,6 +271,42 @@ def load_split(name):
         df['labels'] = df['labels'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
     return df
 
+# ---------- Função para plotar matrizes de confusão ------------------------
+def plot_multilabel_confusion(y_true, y_pred, labels, save_path="outputs/best_model/confusion_all_labels.png"):
+    from sklearn.metrics import multilabel_confusion_matrix
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    import numpy as np
+    mcm = multilabel_confusion_matrix(y_true, y_pred)
+    n_labels = len(labels)
+    fig, axes = plt.subplots(2, (n_labels + 1) // 2, figsize=(5 * ((n_labels + 1) // 2), 10))
+    axes = axes.flatten()
+    # Mapeamento de posições para siglas
+    siglas = np.array([["VN", "FP"], ["FN", "VP"]])
+    for i, label in enumerate(labels):
+        cm = mcm[i]
+        ax = axes[i]
+        # Cria anotações customizadas com valor e sigla
+        annot = np.empty_like(cm).astype(str)
+        for r in range(2):
+            for c in range(2):
+                annot[r, c] = f"{cm[r, c]}\n{siglas[r, c]}"
+        sns.heatmap(cm, annot=annot, fmt='', cmap='Blues', cbar=False,
+                    xticklabels=["Pred 0 (Negativo)", "Pred 1 (Positivo)"],
+                    yticklabels=["True 0 (Negativo)", "True 1 (Positivo)"], ax=ax,
+                    annot_kws={"fontsize":12, "weight":"bold"})
+        ax.set_title(f"{label}", fontsize=14)
+        ax.set_ylabel("Real", fontsize=12)
+        ax.set_xlabel("Predito", fontsize=12)
+    # Remove subplots extras se houver
+    for j in range(i+1, len(axes)):
+        fig.delaxes(axes[j])
+    plt.suptitle("Matrizes de Confusão Binária por Classe\n(VN=Verdadeiro Negativo, FP=Falso Positivo, FN=Falso Negativo, VP=Verdadeiro Positivo)", fontsize=16)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"✅ Matrizes de confusão salvas em: {save_path}")
+
 # ---------- Main com argparse ---------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
@@ -315,19 +352,29 @@ def main():
         result, model_outputs, wrong_preds = model.eval_model(test_df)
         for k, v in result.items():
             print(f"  {k}: {v:.4f}")
+        # Gera e salva as matrizes de confusão após o teste
+        y_true = list(test_df['labels'])
+        y_pred = (np.array(model_outputs) >= 0.5).astype(int) if isinstance(model_outputs, np.ndarray) or (hasattr(model_outputs, 'shape') and model_outputs is not None) else np.array(model_outputs)
+        plot_multilabel_confusion(y_true, y_pred, LABELS)
     if args.test and not args.train:
         # Só testar (carrega modelo salvo)
-        model_dir = 'outputs_bert/'
-        model_files = [os.path.join(model_dir, f) for f in ['pytorch_model.bin', 'config.json']]
+        model_dir = 'outputs/best_model/'
+        model_files = [os.path.join(model_dir, f) for f in ['config.json', 'model.safetensors']]
         if not (os.path.isdir(model_dir) and all(os.path.isfile(f) for f in model_files)):
             print("\n❌ Modelo não encontrado em 'outputs_bert/'.\nTreine o modelo primeiro usando --train antes de testar.")
             return
-        model = make_model()
-        model.model = model.model.from_pretrained(model_dir.rstrip('/'))
+        # Carrega o modelo salvo usando o construtor padrão
+        model = MultiLabelClassificationModel(
+            "bert", model_dir, num_labels=NUM_LABELS, args=None, use_cuda=False
+        )
         print("\nAvaliação no conjunto de teste:")
         result, model_outputs, wrong_preds = model.eval_model(test_df)
         for k, v in result.items():
             print(f"  {k}: {v:.4f}")
+        # Gera e salva as matrizes de confusão após o teste
+        y_true = list(test_df['labels'])
+        y_pred = (np.array(model_outputs) >= 0.5).astype(int) if isinstance(model_outputs, np.ndarray) or (hasattr(model_outputs, 'shape') and model_outputs is not None) else np.array(model_outputs)
+        plot_multilabel_confusion(y_true, y_pred, LABELS)
 
 if __name__ == "__main__":
     main()

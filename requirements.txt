@@ -12,3 +12,4 @@ intel_extension_for_pytorch
 simpletransformers
 matplotlib
 iterative-stratification
+seaborn
