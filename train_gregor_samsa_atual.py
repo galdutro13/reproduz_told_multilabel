@@ -148,8 +148,7 @@ def make_model(evaluate_during_training: bool = True):
     args.logging_steps = 150
     args.tensorboard_dir = "runs/"
     args.num_train_epochs = 3
-    args.max_seq_length = 80
-    args.do_lower_case = True
+    args.max_seq_length = 512
     
 
     model = MultiLabelClassificationModel(
