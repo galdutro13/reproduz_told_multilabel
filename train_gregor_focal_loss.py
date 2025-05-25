@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Fine-tuning BERT multi-label (ToLD-BR) em CPU — estável e sem ruído.
+Fine-tuning BERT multi-label (ToLD-BR) com Focal Loss — estável e sem ruído.
 PyTorch ≥2.1, transformers 4.48.x, simpletransformers 0.64.x, IPEX 2.7.x.
 """
 
@@ -8,6 +8,9 @@ PyTorch ≥2.1, transformers 4.48.x, simpletransformers 0.64.x, IPEX 2.7.x.
 import os, multiprocessing, logging, warnings, textwrap, sys
 import numpy as np
 import argparse
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 N_CPU = max(1, multiprocessing.cpu_count() - 1)
 os.environ.update({
@@ -17,7 +20,7 @@ os.environ.update({
     "ONEDNN_MAX_CPU_ISA":         "AVX2",   # evita caminhos BF16 parciais
     "IPEX_VERBOSE":               "0",
 })
-import torch, pandas as pd
+import pandas as pd
 torch.set_num_threads(N_CPU)
 torch.set_num_interop_threads(max(1, N_CPU // 2))
 
@@ -40,6 +43,75 @@ LABELS       = ["homophobia","obscene","insult","racism","misogyny","xenophobia"
 NUM_LABELS   = len(LABELS)
 SEED         = 42
 
+# ---------- 1.5 | Implementação da Focal Loss -----------------------------
+class FocalLoss(nn.Module):
+    """
+    Focal Loss para classificação multi-label binária.
+    
+    FL(pt) = -α(1-pt)^γ * log(pt)
+    
+    Args:
+        gamma (float): Fator de foco. Valores maiores focam mais em exemplos difíceis.
+                      Tipicamente 2.0.
+        alpha (float ou torch.Tensor): Fator de balanceamento por classe.
+                      Se float, usa o mesmo valor para todas as classes.
+                      Se tensor, deve ter shape (num_labels,).
+        reduction (str): 'mean' ou 'sum' para redução final.
+    """
+    def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+        
+    def forward(self, logits, targets):
+        """
+        Args:
+            logits: Tensor de shape (batch_size, num_labels) - saída antes da sigmoid
+            targets: Tensor de shape (batch_size, num_labels) - rótulos binários
+        
+        Returns:
+            Perda focal escalar
+        """
+        # Calcula BCE com logits para estabilidade numérica
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, targets.float(), reduction='none'
+        )
+        
+        # Calcula probabilidades
+        probs = torch.sigmoid(logits)
+        
+        # Calcula pt (probabilidade da classe correta)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+        
+        # Calcula o fator focal (1 - pt)^gamma
+        focal_weight = (1 - pt).pow(self.gamma)
+        
+        # Aplica o fator focal
+        focal_loss = focal_weight * bce_loss
+        
+        # Aplica alpha se fornecido
+        if self.alpha is not None:
+            if isinstance(self.alpha, (float, int)):
+                alpha_t = self.alpha
+            else:
+                # alpha é um tensor com pesos por classe
+                alpha_t = self.alpha.to(logits.device)
+                # Expande para o shape do batch
+                alpha_t = alpha_t.view(1, -1).expand_as(targets)
+            
+            # Aplica alpha baseado no target
+            alpha_factor = torch.where(targets == 1, alpha_t, 1 - alpha_t)
+            focal_loss = alpha_factor * focal_loss
+        
+        # Redução final
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
 # ---------- 2 | Utilidades -----------------------------------------------
 def load_dataset(path: str) -> pd.DataFrame:
     """Carrega e normaliza o CSV, devolvendo colunas 'text' e 'labels' (lista binária)."""
@@ -53,6 +125,26 @@ def load_dataset(path: str) -> pd.DataFrame:
     print(f"Dataset carregado: {len(df)} amostras — exemplo: "
           f"{df[['text','labels']].iloc[0].to_dict()}")
     return df[["text", "labels"]]
+
+def calculate_class_weights(df: pd.DataFrame) -> torch.Tensor:
+    """
+    Calcula pesos alpha para cada classe baseado na frequência.
+    Retorna tensor de shape (num_labels,) com pesos para exemplos positivos.
+    """
+    # Conta positivos e negativos para cada classe
+    label_matrix = np.array(df['labels'].tolist())
+    pos_counts = label_matrix.sum(axis=0)
+    neg_counts = len(df) - pos_counts
+    
+    # Calcula alpha como proporção de negativos
+    # Alpha para positivos = neg / (pos + neg) = neg / total
+    alphas = neg_counts / len(df)
+    
+    print("\nPesos alpha calculados para cada classe (positivos):")
+    for i, label in enumerate(LABELS):
+        print(f"  {label}: α={alphas[i]:.3f} (pos={pos_counts[i]}, neg={neg_counts[i]})")
+    
+    return torch.tensor(alphas, dtype=torch.float32)
 
 # ---------- 2b | Métricas ------------------------------------------------
 from sklearn.metrics import f1_score, hamming_loss, average_precision_score
@@ -90,7 +182,6 @@ def compute_avg_precision(labels, preds, **kwargs):
     preds  = np.asarray(preds, dtype=float)
     # average='macro' agrega performance de cada classe
     return average_precision_score(labels, preds, average="macro")
-
 
 def split_stratified_holdout(df: pd.DataFrame,
                              seed: int = SEED,
@@ -132,6 +223,7 @@ def split_stratified_holdout(df: pd.DataFrame,
             "Instale-o via 'pip install iterative-stratification' para melhor fidelidade."
         )
         from sklearn.model_selection import train_test_split
+        idx = np.arange(len(df))
         y_single = df[LABELS].idxmax(axis=1)  # aproximação mono-rótulo para estratificar
         train_idx, temp_idx = train_test_split(
             idx, test_size=(val_ratio + test_ratio), stratify=y_single, random_state=seed
@@ -151,7 +243,7 @@ def split_stratified_holdout(df: pd.DataFrame,
     return d_train, d_val, d_test
 
 # ---------- 3 | Modelo ----------------------------------------------------
-def make_model(evaluate_during_training: bool = True):
+def make_model(evaluate_during_training: bool = True, alpha_weights: torch.Tensor = None):
     args = MultiLabelClassificationArgs()
     args.manual_seed = SEED
     args.process_count = 1
@@ -172,6 +264,13 @@ def make_model(evaluate_during_training: bool = True):
     args.max_seq_length = 80
     args.do_lower_case = True
     
+    # Configurar Focal Loss
+    if alpha_weights is not None:
+        focal_loss = FocalLoss(gamma=2.0, alpha=alpha_weights, reduction='mean')
+        args.loss_function = focal_loss
+        print(f"✨ Focal Loss configurada com gamma=2.0 e alphas customizados")
+    else:
+        print("⚠️  Usando BCEWithLogitsLoss padrão (sem Focal Loss)")
 
     model = MultiLabelClassificationModel(
         "bert", MODEL_NAME, num_labels=NUM_LABELS, args=args, use_cuda=False
@@ -212,7 +311,7 @@ def make_model(evaluate_during_training: bool = True):
     return model
 
 # ---------- 4 | Execução --------------------------------------------------
-import matplotlib.pyplot as plt              # novo import
+import matplotlib.pyplot as plt
 from pathlib import Path
 
 def plot_train_curves(training_details, save_path="outputs_bert/loss_f1_vs_step.png"):
@@ -261,8 +360,8 @@ def plot_train_curves(training_details, save_path="outputs_bert/loss_f1_vs_step.
     plt.close()
     print(f"✅  Curva Loss/F1 salva em: {save_path}")
 
-def train(df_train, df_val, evaluate_during_training: bool = False):
-    model = make_model(evaluate_during_training=evaluate_during_training)
+def train(df_train, df_val, evaluate_during_training: bool = False, alpha_weights: torch.Tensor = None):
+    model = make_model(evaluate_during_training=evaluate_during_training, alpha_weights=alpha_weights)
     métricas = { 
         "macro_f1":        macro_f1, 
         "hamming_loss":    compute_hamming, 
@@ -274,14 +373,13 @@ def train(df_train, df_val, evaluate_during_training: bool = False):
         df_train, eval_df=df_val, **métricas
     )                                         # ← capturamos training_details
     print("Treino concluído.")
-    return model,training_details
+    return model, training_details
 
-def train_and_eval(df_train, df_val):
-    model, training_details = train(df_train, df_val, True)
+def train_and_eval(df_train, df_val, alpha_weights: torch.Tensor = None):
+    model, training_details = train(df_train, df_val, True, alpha_weights)
 
-    plot_train_curves(training_details, "outputs_bert/lr_vs_loss.png")
+    plot_train_curves(training_details, "outputs_bert/loss_f1_vs_step.png")
     return model
-
 
 def predict(model, textos):
     preds, _ = model.predict(textos)
@@ -369,7 +467,7 @@ def plot_cooccurrence_heatmap(y_true, y_pred, labels, save_path=f"{MODEL_DIR}coo
 # ---------- Main com argparse ---------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Fine-tuning BERT multi-label (ToLD-BR) com splits persistentes.\n\nExemplos:\n  python train_gregor_samsa.py --train\n  python train_gregor_samsa.py --test\n  python train_gregor_samsa.py --train --validate\n",
+        description="Fine-tuning BERT multi-label (ToLD-BR) com Focal Loss.\n\nExemplos:\n  python train_gregor_samsa_focal.py --train\n  python train_gregor_samsa_focal.py --test\n  python train_gregor_samsa_focal.py --train --validate\n",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument('--train', action='store_true', help='Treina o modelo (gera splits se necessário)')
@@ -396,13 +494,18 @@ def main():
     else:
         print("Splits carregados do disco.")
 
+    # Calcular pesos alpha baseados no dataset de treino
+    alpha_weights = None
+    if args.train:
+        alpha_weights = calculate_class_weights(train_df)
+
     model = None
     if args.train:
         if args.validate:
-            model = train_and_eval(train_df, val_df)
+            model = train_and_eval(train_df, val_df, alpha_weights)
         else:
             # Treina sem validação
-            model, _ = train(train_df, val_df)
+            model, _ = train(train_df, val_df, alpha_weights=alpha_weights)
         # Após treino, sempre testa
         print("\nAvaliação no conjunto de teste:")
         result, model_outputs, wrong_preds = model.eval_model(test_df)
@@ -421,6 +524,8 @@ def main():
             print("\n❌ Modelo não encontrado em 'outputs_bert/'.\nTreine o modelo primeiro usando --train antes de testar.")
             return
         # Carrega o modelo salvo usando o construtor padrão
+        # Nota: ao carregar, não temos a focal loss salva, então ela não será usada na inferência
+        # Isso é OK pois a loss function só é usada durante o treino
         model = MultiLabelClassificationModel(
             "bert", model_dir, num_labels=NUM_LABELS, args=None, use_cuda=False
         )
