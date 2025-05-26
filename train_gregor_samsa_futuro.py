@@ -132,6 +132,7 @@ def split_stratified_holdout(df: pd.DataFrame,
             "Instale-o via 'pip install iterative-stratification' para melhor fidelidade."
         )
         from sklearn.model_selection import train_test_split
+        idx = np.arange(len(df))
         y_single = df[LABELS].idxmax(axis=1)  # aproximação mono-rótulo para estratificar
         train_idx, temp_idx = train_test_split(
             idx, test_size=(val_ratio + test_ratio), stratify=y_single, random_state=seed
@@ -522,6 +523,175 @@ def plot_metrics_per_class(y_true, y_pred, labels, save_path_bar=f"{MODEL_DIR}me
             print(f"  - {row['Classe']}: F1={row['F1-Score']:.3f}, Support={row['Support']}")
     
     return metrics_df
+
+# ---------- Função para plotar curvas PR e ROC por classe --------------------
+def plot_pr_roc_curves(y_true, y_scores, labels, 
+                       save_path_pr=f"{MODEL_DIR}pr_curves_per_class.png",
+                       save_path_roc=f"{MODEL_DIR}roc_curves_per_class.png"):
+    """
+    Plota curvas Precision-Recall e ROC para cada classe.
+    
+    Args:
+        y_true: Array de labels verdadeiros (shape: n_samples, n_classes)
+        y_scores: Array de scores/probabilidades (shape: n_samples, n_classes)
+        labels: Lista com nomes das classes
+        save_path_pr: Caminho para salvar curva PR
+        save_path_roc: Caminho para salvar curva ROC
+    
+    Returns:
+        Dict com PR-AUC e ROC-AUC por classe
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import precision_recall_curve, roc_curve, auc
+    import pandas as pd
+    
+    y_true = np.array(y_true)
+    y_scores = np.array(y_scores)
+    
+    # Cores distintas para cada classe
+    colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c']
+    
+    # Dicionário para armazenar métricas
+    metrics_dict = {
+        'Classe': [],
+        'PR-AUC': [],
+        'ROC-AUC': [],
+        'Support': []
+    }
+    
+    # 1. Curvas Precision-Recall
+    fig_pr, ax_pr = plt.subplots(figsize=(10, 8))
+    
+    for i, (label, color) in enumerate(zip(labels, colors)):
+        # Calcula precision, recall e thresholds
+        precision, recall, thresholds_pr = precision_recall_curve(
+            y_true[:, i], y_scores[:, i]
+        )
+        
+        # Calcula PR-AUC
+        pr_auc = auc(recall, precision)
+        
+        # Conta o support (número de positivos)
+        support = int(y_true[:, i].sum())
+        
+        # Plota a curva
+        ax_pr.plot(recall, precision, color=color, linewidth=2.5,
+                   label=f'{label} (AUC={pr_auc:.3f}, n={support})')
+        
+        # Preenche área sob a curva
+        ax_pr.fill_between(recall, precision, alpha=0.2, color=color)
+        
+        # Armazena métricas
+        metrics_dict['Classe'].append(label)
+        metrics_dict['PR-AUC'].append(pr_auc)
+        metrics_dict['Support'].append(support)
+    
+    # Linha de baseline (random classifier)
+    total_positives = y_true.sum()
+    total_samples = y_true.shape[0] * y_true.shape[1]
+    baseline = total_positives / total_samples
+    ax_pr.axhline(y=baseline, color='gray', linestyle='--', linewidth=1.5,
+                  label=f'Baseline (random): {baseline:.3f}')
+    
+    ax_pr.set_xlabel('Recall', fontsize=14)
+    ax_pr.set_ylabel('Precision', fontsize=14)
+    ax_pr.set_title('Curvas Precision-Recall por Classe\n(Área maior indica melhor performance)', 
+                    fontsize=16)
+    ax_pr.legend(loc='lower left', fontsize=11)
+    ax_pr.grid(True, alpha=0.3)
+    ax_pr.set_xlim([0, 1.05])
+    ax_pr.set_ylim([0, 1.05])
+    
+    plt.tight_layout()
+    plt.savefig(save_path_pr, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Curvas PR salvas em: {save_path_pr}")
+    
+    # 2. Curvas ROC
+    fig_roc, ax_roc = plt.subplots(figsize=(10, 8))
+    
+    for i, (label, color) in enumerate(zip(labels, colors)):
+        # Calcula FPR, TPR e thresholds
+        fpr, tpr, thresholds_roc = roc_curve(y_true[:, i], y_scores[:, i])
+        
+        # Calcula ROC-AUC
+        roc_auc = auc(fpr, tpr)
+        
+        # Support
+        support = int(y_true[:, i].sum())
+        
+        # Plota a curva
+        ax_roc.plot(fpr, tpr, color=color, linewidth=2.5,
+                    label=f'{label} (AUC={roc_auc:.3f}, n={support})')
+        
+        # Preenche área sob a curva
+        ax_roc.fill_between(fpr, tpr, alpha=0.2, color=color)
+        
+        # Armazena ROC-AUC
+        metrics_dict['ROC-AUC'].append(roc_auc)
+    
+    # Linha diagonal (random classifier)
+    ax_roc.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Random classifier')
+    
+    ax_roc.set_xlabel('Taxa de Falsos Positivos (FPR)', fontsize=14)
+    ax_roc.set_ylabel('Taxa de Verdadeiros Positivos (TPR)', fontsize=14)
+    ax_roc.set_title('Curvas ROC por Classe\n(Área maior indica melhor discriminação)', 
+                     fontsize=16)
+    ax_roc.legend(loc='lower right', fontsize=11)
+    ax_roc.grid(True, alpha=0.3)
+    ax_roc.set_xlim([0, 1.05])
+    ax_roc.set_ylim([0, 1.05])
+    
+    plt.tight_layout()
+    plt.savefig(save_path_roc, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Curvas ROC salvas em: {save_path_roc}")
+    
+    # 3. Análise de métricas
+    metrics_df = pd.DataFrame(metrics_dict)
+    metrics_df = metrics_df.sort_values('Support', ascending=False)
+    
+    print("\n📈 Análise de Curvas PR e ROC:")
+    print("="*65)
+    print(f"{'Classe':<15} {'Support':>8} {'PR-AUC':>10} {'ROC-AUC':>10}")
+    print("-"*65)
+    for _, row in metrics_df.iterrows():
+        print(f"{row['Classe']:<15} {row['Support']:>8} "
+              f"{row['PR-AUC']:>10.3f} {row['ROC-AUC']:>10.3f}")
+    print("="*65)
+    
+    # Análise de correlação
+    print("\n🔍 Insights sobre Thresholds:")
+    
+    # Classes com baixo PR-AUC
+    low_pr_auc = metrics_df[metrics_df['PR-AUC'] < 0.5]
+    if not low_pr_auc.empty:
+        print("\n⚠️  Classes com PR-AUC < 0.5 (difíceis de detectar):")
+        for _, row in low_pr_auc.iterrows():
+            print(f"  - {row['Classe']}: PR-AUC={row['PR-AUC']:.3f}, "
+                  f"Support={row['Support']}")
+        print("  → Considere ajustar thresholds específicos ou data augmentation")
+    
+    # Diferença entre ROC-AUC e PR-AUC
+    metrics_df['AUC_diff'] = metrics_df['ROC-AUC'] - metrics_df['PR-AUC']
+    high_diff = metrics_df[metrics_df['AUC_diff'] > 0.3]
+    if not high_diff.empty:
+        print("\n📊 Classes com grande diferença ROC-AUC vs PR-AUC:")
+        for _, row in high_diff.iterrows():
+            print(f"  - {row['Classe']}: ROC={row['ROC-AUC']:.3f}, "
+                  f"PR={row['PR-AUC']:.3f} (diff={row['AUC_diff']:.3f})")
+        print("  → Indica forte desbalanceamento - PR-AUC é mais confiável")
+    
+    # Recomendações de threshold
+    print("\n💡 Recomendações para ajuste de thresholds:")
+    for _, row in metrics_df.iterrows():
+        if row['Support'] < 500:  # Classes raras
+            print(f"  - {row['Classe']}: Considere threshold < 0.5 "
+                  f"(classe rara com {row['Support']} exemplos)")
+    
+    return metrics_df
+
 # ---------- Main com argparse ---------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
@@ -570,7 +740,7 @@ def main():
         plot_multilabel_confusion(y_true, y_pred, LABELS)
         plot_cooccurrence_heatmap(y_true, y_pred, LABELS)
         plot_metrics_per_class(y_true, y_pred, LABELS)
-        plot_metrics_per_class(y_true, y_pred, LABELS)
+        plot_pr_roc_curves(y_true, model_outputs, LABELS)
     if args.test and not args.train:
         # Só testar (carrega modelo salvo)
         model_dir = MODEL_DIR
@@ -591,6 +761,8 @@ def main():
         y_pred = (np.array(model_outputs) >= 0.5).astype(int) if isinstance(model_outputs, np.ndarray) or (hasattr(model_outputs, 'shape') and model_outputs is not None) else np.array(model_outputs)
         plot_multilabel_confusion(y_true, y_pred, LABELS)
         plot_cooccurrence_heatmap(y_true, y_pred, LABELS)
-
+        plot_metrics_per_class(y_true, y_pred, LABELS)
+        plot_pr_roc_curves(y_true, model_outputs, LABELS)
+        
 if __name__ == "__main__":
     main()
