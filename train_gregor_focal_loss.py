@@ -2,6 +2,12 @@
 """
 Fine-tuning BERT multi-label (ToLD-BR) com Focal Loss — estável e sem ruído.
 PyTorch ≥2.1, transformers 4.48.x, simpletransformers 0.64.x, IPEX 2.7.x.
+
+Visualizações incluídas:
+- Curvas de treino (loss/F1)
+- Matrizes de confusão por classe
+- Heatmap de coocorrência
+- Barplot e radar chart de métricas por classe (para análise de desbalanceamento)
 """
 
 # ---------- 0 | Ambiente -------------------------------------------------
@@ -464,10 +470,167 @@ def plot_cooccurrence_heatmap(y_true, y_pred, labels, save_path=f"{MODEL_DIR}coo
     plt.close()
     print(f"✅ Heatmap de coocorrência salvo em: {save_path}")
 
+# ---------- Função para calcular e plotar métricas por classe ----------------
+def plot_metrics_per_class(y_true, y_pred, labels, save_path_bar=f"{MODEL_DIR}metrics_per_class_bar.png", 
+                          save_path_radar=f"{MODEL_DIR}metrics_per_class_radar.png"):
+    """
+    Calcula e plota precision, recall e F1 por classe.
+    Gera tanto barplot agrupado quanto radar chart.
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.metrics import precision_recall_fscore_support
+    
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Calcula métricas por classe
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true, y_pred, average=None, zero_division=0
+    )
+    
+    # DataFrame para facilitar visualização
+    metrics_df = pd.DataFrame({
+        'Classe': labels,
+        'Precision': precision,
+        'Recall': recall,
+        'F1-Score': f1,
+        'Support': support
+    })
+    
+    # Ordena por support (quantidade de exemplos positivos) para visualizar desbalanceamento
+    metrics_df = metrics_df.sort_values('Support', ascending=False)
+    
+    # Print das métricas
+    print("\n📊 Métricas por Classe (ordenadas por frequência):")
+    print("="*70)
+    print(f"{'Classe':<15} {'Support':>8} {'Precision':>10} {'Recall':>10} {'F1-Score':>10}")
+    print("-"*70)
+    for _, row in metrics_df.iterrows():
+        print(f"{row['Classe']:<15} {row['Support']:>8} {row['Precision']:>10.3f} "
+              f"{row['Recall']:>10.3f} {row['F1-Score']:>10.3f}")
+    print("="*70)
+    
+    # 1. Barplot Agrupado
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    x = np.arange(len(labels))
+    width = 0.25
+    
+    # Reordena para a ordem original das labels
+    metrics_ordered = metrics_df.set_index('Classe').loc[labels].reset_index()
+    
+    bars1 = ax.bar(x - width, metrics_ordered['Precision'], width, label='Precision', color='#3498db')
+    bars2 = ax.bar(x, metrics_ordered['Recall'], width, label='Recall', color='#2ecc71')
+    bars3 = ax.bar(x + width, metrics_ordered['F1-Score'], width, label='F1-Score', color='#e74c3c')
+    
+    # Adiciona valores nas barras
+    def autolabel(bars):
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.2f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3),
+                       textcoords="offset points",
+                       ha='center', va='bottom', fontsize=8)
+    
+    autolabel(bars1)
+    autolabel(bars2)
+    autolabel(bars3)
+    
+    # Adiciona linha secundária com support
+    ax2 = ax.twinx()
+    ax2.plot(x, metrics_ordered['Support'], 'k--', marker='o', linewidth=2, 
+             markersize=8, label='Support (N positivos)')
+    ax2.set_ylabel('Support (número de exemplos positivos)', fontsize=12)
+    ax2.legend(loc='upper right')
+    
+    # Configurações do gráfico
+    ax.set_xlabel('Classes', fontsize=12)
+    ax.set_ylabel('Métricas', fontsize=12)
+    ax.set_title('Métricas de Performance por Classe\n(Classes ordenadas por posição original)', fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha='right')
+    ax.legend(loc='upper left')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_ylim(0, 1.1)
+    
+    plt.tight_layout()
+    plt.savefig(save_path_bar, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Barplot de métricas por classe salvo em: {save_path_bar}")
+    
+    # 2. Radar Chart
+    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
+    
+    # Ângulos para cada classe
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+    angles += angles[:1]  # Fecha o círculo
+    
+    # Dados para o radar
+    precision_data = metrics_ordered['Precision'].tolist() + [metrics_ordered['Precision'].iloc[0]]
+    recall_data = metrics_ordered['Recall'].tolist() + [metrics_ordered['Recall'].iloc[0]]
+    f1_data = metrics_ordered['F1-Score'].tolist() + [metrics_ordered['F1-Score'].iloc[0]]
+    
+    # Plot
+    ax.plot(angles, precision_data, 'o-', linewidth=2, label='Precision', color='#3498db')
+    ax.fill(angles, precision_data, alpha=0.25, color='#3498db')
+    
+    ax.plot(angles, recall_data, 'o-', linewidth=2, label='Recall', color='#2ecc71')
+    ax.fill(angles, recall_data, alpha=0.25, color='#2ecc71')
+    
+    ax.plot(angles, f1_data, 'o-', linewidth=2, label='F1-Score', color='#e74c3c')
+    ax.fill(angles, f1_data, alpha=0.25, color='#e74c3c')
+    
+    # Configurações
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=10)
+    ax.grid(True)
+    
+    # Adiciona anotações com support
+    for i, (angle, label) in enumerate(zip(angles[:-1], labels)):
+        support = metrics_ordered.iloc[i]['Support']
+        ax.text(angle, 1.15, f'{label}\n(n={support})', 
+                ha='center', va='center', fontsize=10, 
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+    
+    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+    plt.title('Radar Chart: Métricas por Classe\n(com número de exemplos positivos)', 
+              fontsize=14, pad=20)
+    
+    plt.tight_layout()
+    plt.savefig(save_path_radar, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Radar chart de métricas por classe salvo em: {save_path_radar}")
+    
+    # Análise de desbalanceamento
+    print("\n🔍 Análise de Desbalanceamento:")
+    max_support = metrics_df['Support'].max()
+    min_support = metrics_df['Support'].min()
+    print(f"  - Classe mais frequente: {metrics_df.iloc[0]['Classe']} ({max_support} exemplos)")
+    print(f"  - Classe menos frequente: {metrics_df.iloc[-1]['Classe']} ({min_support} exemplos)")
+    print(f"  - Razão de desbalanceamento: {max_support/min_support:.1f}:1")
+    
+    # Identifica classes problemáticas
+    problematic_classes = metrics_df[metrics_df['F1-Score'] < 0.5]
+    if not problematic_classes.empty:
+        print("\n⚠️  Classes com F1-Score < 0.5 (requerem atenção):")
+        for _, row in problematic_classes.iterrows():
+            print(f"  - {row['Classe']}: F1={row['F1-Score']:.3f}, Support={row['Support']}")
+    
+    return metrics_df
+
 # ---------- Main com argparse ---------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Fine-tuning BERT multi-label (ToLD-BR) com Focal Loss.\n\nExemplos:\n  python train_gregor_samsa_focal.py --train\n  python train_gregor_samsa_focal.py --test\n  python train_gregor_samsa_focal.py --train --validate\n",
+        description="Fine-tuning BERT multi-label (ToLD-BR) com Focal Loss.\n\nVisualizações geradas:\n  - Curvas de loss e F1-macro durante treino\n  - Matrizes de confusão por classe\n  - Heatmap de coocorrência\n  - Barplot e radar chart de métricas por classe\n\nExemplos:\n  python train_gregor_samsa_focal.py --train\n  python train_gregor_samsa_focal.py --test\n  python train_gregor_samsa_focal.py --train --validate\n",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument('--train', action='store_true', help='Treina o modelo (gera splits se necessário)')
@@ -516,6 +679,8 @@ def main():
         y_pred = (np.array(model_outputs) >= 0.5).astype(int) if isinstance(model_outputs, np.ndarray) or (hasattr(model_outputs, 'shape') and model_outputs is not None) else np.array(model_outputs)
         plot_multilabel_confusion(y_true, y_pred, LABELS)
         plot_cooccurrence_heatmap(y_true, y_pred, LABELS)
+        plot_metrics_per_class(y_true, y_pred, LABELS)
+        plot_metrics_per_class(y_true, y_pred, LABELS)
     if args.test and not args.train:
         # Só testar (carrega modelo salvo)
         model_dir = MODEL_DIR
