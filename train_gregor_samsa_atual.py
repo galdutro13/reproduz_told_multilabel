@@ -9,6 +9,7 @@ Visualizações incluídas:
 - Heatmap de coocorrência
 - Barplot e radar chart de métricas por classe
 - Curvas PR e ROC por classe (para análise de thresholds)
+- Curvas F-beta × Threshold (F0.5, F1, F2) para otimização de limiares
 """
 
 # ---------- 0 | Ambiente -------------------------------------------------
@@ -505,6 +506,302 @@ def plot_metrics_per_class(y_true, y_pred, labels, save_path_bar=f"{MODEL_DIR}me
     
     return metrics_df
 
+# ---------- Função para plotar curvas F-beta × Threshold ---------------------
+def plot_fbeta_threshold_curves(y_true, y_scores, labels,
+                               save_path_individual=f"{MODEL_DIR}fbeta_threshold_per_class.png",
+                               save_path_global=f"{MODEL_DIR}fbeta_threshold_global.png"):
+    """
+    Plota curvas F-beta (F0.5, F1, F2) em função do threshold para cada classe
+    e para métricas micro-agregadas (globais).
+    
+    Args:
+        y_true: Array de labels verdadeiros (shape: n_samples, n_classes)
+        y_scores: Array de scores/probabilidades (shape: n_samples, n_classes)
+        labels: Lista com nomes das classes
+        save_path_individual: Caminho para salvar curvas por classe
+        save_path_global: Caminho para salvar curvas globais
+    
+    Returns:
+        Dict com thresholds ótimos por classe e beta
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import fbeta_score, precision_recall_fscore_support
+    import pandas as pd
+    from matplotlib.gridspec import GridSpec
+    
+    y_true = np.array(y_true)
+    y_scores = np.array(y_scores)
+    
+    # Thresholds para testar (0.1 a 0.9 com passo de 0.01)
+    thresholds = np.arange(0.1, 0.91, 0.01)
+    
+    # Betas para calcular (F0.5, F1, F2)
+    betas = [0.5, 1.0, 2.0]
+    beta_colors = {'0.5': '#e74c3c', '1.0': '#3498db', '2.0': '#2ecc71'}
+    beta_names = {'0.5': 'F₀.₅ (precision-focused)', 
+                  '1.0': 'F₁ (balanced)', 
+                  '2.0': 'F₂ (recall-focused)'}
+    
+    # Dicionário para armazenar resultados
+    optimal_thresholds = {
+        'per_class': {},
+        'global': {}
+    }
+    
+    # 1. Curvas F-beta por classe
+    n_classes = len(labels)
+    fig1 = plt.figure(figsize=(16, 10))
+    gs = GridSpec(3, 2, figure=fig1, hspace=0.3, wspace=0.25)
+    
+    for class_idx, label in enumerate(labels):
+        ax = fig1.add_subplot(gs[class_idx // 2, class_idx % 2])
+        
+        # Support da classe
+        support = int(y_true[:, class_idx].sum())
+        
+        # Dicionário para esta classe
+        optimal_thresholds['per_class'][label] = {}
+        
+        for beta in betas:
+            fbeta_scores = []
+            
+            # Calcula F-beta para cada threshold
+            for thresh in thresholds:
+                y_pred_binary = (y_scores[:, class_idx] >= thresh).astype(int)
+                
+                # Calcula F-beta apenas para esta classe
+                if y_true[:, class_idx].sum() > 0 and y_pred_binary.sum() > 0:
+                    score = fbeta_score(y_true[:, class_idx], y_pred_binary, 
+                                       beta=beta, zero_division=0)
+                else:
+                    score = 0.0
+                
+                fbeta_scores.append(score)
+            
+            # Encontra threshold ótimo
+            fbeta_scores = np.array(fbeta_scores)
+            optimal_idx = np.argmax(fbeta_scores)
+            optimal_thresh = thresholds[optimal_idx]
+            optimal_score = fbeta_scores[optimal_idx]
+            
+            # Armazena threshold ótimo
+            optimal_thresholds['per_class'][label][f'F{beta}'] = {
+                'threshold': optimal_thresh,
+                'score': optimal_score
+            }
+            
+            # Plota curva
+            ax.plot(thresholds, fbeta_scores, 
+                   color=beta_colors[str(beta)], 
+                   linewidth=2.5,
+                   label=f'{beta_names[str(beta)]}: best={optimal_thresh:.2f} (F={optimal_score:.3f})')
+            
+            # Marca ponto ótimo
+            ax.scatter(optimal_thresh, optimal_score, 
+                      color=beta_colors[str(beta)], 
+                      s=100, zorder=5, edgecolors='black', linewidth=2)
+        
+        # Linha vertical no threshold padrão (0.5)
+        ax.axvline(x=0.5, color='gray', linestyle='--', alpha=0.5, 
+                  label='Default threshold')
+        
+        ax.set_xlabel('Threshold', fontsize=11)
+        ax.set_ylabel('F-beta Score', fontsize=11)
+        ax.set_title(f'{label} (n={support})', fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9, loc='best')
+        ax.set_xlim(0.05, 0.95)
+        ax.set_ylim(-0.05, 1.05)
+    
+    plt.suptitle('Curvas F-beta × Threshold por Classe\n'
+                 'Pontos marcados indicam thresholds ótimos', 
+                 fontsize=16, y=0.98)
+    plt.subplots_adjust(top=0.93)  # Ajusta espaço para o título
+    plt.savefig(save_path_individual, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Curvas F-beta por classe salvas em: {save_path_individual}")
+    
+    # 2. Curvas F-beta globais (micro-averaged)
+    fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # 2.1 Micro-averaged (todos os rótulos juntos)
+    # Primeiro, calcula precision e recall para todos os thresholds
+    precision_scores = []
+    recall_scores = []
+    
+    for thresh in thresholds:
+        y_pred_binary = (y_scores >= thresh).astype(int)
+        prec, rec, _, _ = precision_recall_fscore_support(
+            y_true.ravel(), y_pred_binary.ravel(), 
+            average='binary', zero_division=0
+        )
+        precision_scores.append(prec)
+        recall_scores.append(rec)
+    
+    # Agora calcula F-beta para cada beta
+    for beta in betas:
+        fbeta_scores_micro = []
+        
+        for thresh in thresholds:
+            # Binariza todas as predições com este threshold
+            y_pred_binary = (y_scores >= thresh).astype(int)
+            
+            # Calcula F-beta micro-averaged
+            score = fbeta_score(y_true.ravel(), y_pred_binary.ravel(), 
+                               beta=beta, average='binary', zero_division=0)
+            fbeta_scores_micro.append(score)
+        
+        # Encontra threshold ótimo
+        fbeta_scores_micro = np.array(fbeta_scores_micro)
+        optimal_idx = np.argmax(fbeta_scores_micro)
+        optimal_thresh = thresholds[optimal_idx]
+        optimal_score = fbeta_scores_micro[optimal_idx]
+        
+        # Armazena threshold ótimo global
+        optimal_thresholds['global'][f'F{beta}'] = {
+            'threshold': optimal_thresh,
+            'score': optimal_score
+        }
+        
+        # Plota curva
+        ax1.plot(thresholds, fbeta_scores_micro, 
+                color=beta_colors[str(beta)], 
+                linewidth=2.5,
+                label=f'{beta_names[str(beta)]}: best={optimal_thresh:.2f} (F={optimal_score:.3f})')
+        
+        # Marca ponto ótimo
+        ax1.scatter(optimal_thresh, optimal_score, 
+                   color=beta_colors[str(beta)], 
+                   s=120, zorder=5, edgecolors='black', linewidth=2)
+    
+    # Linha vertical no threshold padrão
+    ax1.axvline(x=0.5, color='gray', linestyle='--', alpha=0.5, 
+               label='Default threshold')
+    
+    ax1.set_xlabel('Threshold', fontsize=12)
+    ax1.set_ylabel('F-beta Score', fontsize=12)
+    ax1.set_title('Curvas F-beta Globais (Micro-averaged)\n'
+                  'Considera todos os rótulos conjuntamente', fontsize=13)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=10)
+    ax1.set_xlim(0.05, 0.95)
+    ax1.set_ylim(-0.05, 1.05)
+    
+    # 2.2 Trade-off Precision × Recall
+    ax2.plot(thresholds, precision_scores, 'b-', linewidth=2.5, label='Precision')
+    ax2.plot(thresholds, recall_scores, 'g-', linewidth=2.5, label='Recall')
+    
+    # Marca threshold ótimo para F1
+    f1_optimal_thresh = optimal_thresholds['global']['F1.0']['threshold']
+    f1_optimal_idx = np.argmin(np.abs(thresholds - f1_optimal_thresh))
+    
+    ax2.scatter(f1_optimal_thresh, precision_scores[f1_optimal_idx], 
+               color='blue', s=120, zorder=5, edgecolors='black', linewidth=2)
+    ax2.scatter(f1_optimal_thresh, recall_scores[f1_optimal_idx], 
+               color='green', s=120, zorder=5, edgecolors='black', linewidth=2)
+    
+    ax2.axvline(x=f1_optimal_thresh, color='red', linestyle=':', alpha=0.7,
+               label=f'F₁ optimal: {f1_optimal_thresh:.2f}')
+    ax2.axvline(x=0.5, color='gray', linestyle='--', alpha=0.5, 
+               label='Default threshold')
+    
+    ax2.set_xlabel('Threshold', fontsize=12)
+    ax2.set_ylabel('Score', fontsize=12)
+    ax2.set_title('Trade-off Precision × Recall\n'
+                  'Mostra como métricas variam com threshold', fontsize=13)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=10)
+    ax2.set_xlim(0.05, 0.95)
+    ax2.set_ylim(-0.05, 1.05)
+    
+    plt.suptitle('Análise Global de Thresholds para Multi-label Classification', 
+                 fontsize=16)
+    plt.tight_layout()
+    plt.savefig(save_path_global, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"✅ Curvas F-beta globais salvas em: {save_path_global}")
+    
+    # 3. Análise e recomendações
+    print("\n🎯 Análise de Thresholds Ótimos:")
+    print("="*80)
+    
+    # Por classe
+    print("\n📊 Thresholds Ótimos por Classe:")
+    print("-"*80)
+    print(f"{'Classe':<15} {'F₀.₅ (thresh/score)':<20} {'F₁ (thresh/score)':<20} {'F₂ (thresh/score)':<20}")
+    print("-"*80)
+    
+    for label in labels:
+        f05 = optimal_thresholds['per_class'][label]['F0.5']
+        f1 = optimal_thresholds['per_class'][label]['F1.0']
+        f2 = optimal_thresholds['per_class'][label]['F2.0']
+        
+        print(f"{label:<15} "
+              f"{f05['threshold']:.2f} / {f05['score']:.3f}      "
+              f"{f1['threshold']:.2f} / {f1['score']:.3f}      "
+              f"{f2['threshold']:.2f} / {f2['score']:.3f}")
+    
+    # Global
+    print("\n🌍 Thresholds Ótimos Globais (Micro-averaged):")
+    print("-"*80)
+    for beta in betas:
+        info = optimal_thresholds['global'][f'F{beta}']
+        print(f"  {beta_names[str(beta)]:<30}: "
+              f"threshold={info['threshold']:.2f}, score={info['score']:.3f}")
+    
+    # Análise de padrões
+    print("\n💡 Insights e Recomendações:")
+    
+    # Classes que se beneficiam de threshold menor
+    low_thresh_classes = []
+    for label in labels:
+        if optimal_thresholds['per_class'][label]['F1.0']['threshold'] < 0.4:
+            low_thresh_classes.append(label)
+    
+    if low_thresh_classes:
+        print(f"\n⬇️  Classes que se beneficiam de threshold BAIXO (<0.4):")
+        for cls in low_thresh_classes:
+            thresh = optimal_thresholds['per_class'][cls]['F1.0']['threshold']
+            print(f"  - {cls}: threshold ótimo = {thresh:.2f}")
+        print("  → Geralmente classes raras ou difíceis de detectar")
+    
+    # Classes que se beneficiam de threshold maior
+    high_thresh_classes = []
+    for label in labels:
+        if optimal_thresholds['per_class'][label]['F1.0']['threshold'] > 0.6:
+            high_thresh_classes.append(label)
+    
+    if high_thresh_classes:
+        print(f"\n⬆️  Classes que se beneficiam de threshold ALTO (>0.6):")
+        for cls in high_thresh_classes:
+            thresh = optimal_thresholds['per_class'][cls]['F1.0']['threshold']
+            print(f"  - {cls}: threshold ótimo = {thresh:.2f}")
+        print("  → Geralmente classes frequentes ou com muitos falsos positivos")
+    
+    # Recomendação final
+    print("\n📌 Estratégias Recomendadas:")
+    print("  1. Use thresholds específicos por classe para maximizar performance")
+    print("  2. Para aplicação sensível a falsos positivos: use thresholds de F₀.₅")
+    print("  3. Para aplicação sensível a falsos negativos: use thresholds de F₂")
+    print(f"  4. Threshold global recomendado: {optimal_thresholds['global']['F1.0']['threshold']:.2f} "
+          f"(ao invés do padrão 0.5)")
+    
+    # Comparação com threshold padrão
+    print("\n📈 Ganho potencial vs threshold padrão (0.5):")
+    default_scores = []
+    for class_idx in range(n_classes):
+        y_pred_default = (y_scores[:, class_idx] >= 0.5).astype(int)
+        score_default = fbeta_score(y_true[:, class_idx], y_pred_default, 
+                                   beta=1.0, zero_division=0)
+        score_optimal = optimal_thresholds['per_class'][labels[class_idx]]['F1.0']['score']
+        improvement = ((score_optimal - score_default) / max(score_default, 0.001)) * 100
+        if improvement > 5:  # Só mostra melhorias significativas
+            print(f"  - {labels[class_idx]}: +{improvement:.1f}% "
+                  f"(de {score_default:.3f} para {score_optimal:.3f})")
+    
+    return optimal_thresholds
+
 # ---------- Função para plotar curvas PR e ROC por classe --------------------
 def plot_pr_roc_curves(y_true, y_scores, labels, 
                        save_path_pr=f"{MODEL_DIR}pr_curves_per_class.png",
@@ -676,7 +973,7 @@ def plot_pr_roc_curves(y_true, y_scores, labels,
 # ---------- Main com argparse ---------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Fine-tuning BERT multi-label (ToLD-BR) com splits persistentes.\n\nVisualizações geradas:\n  - Curvas de loss e F1-macro durante treino\n  - Matrizes de confusão por classe\n  - Heatmap de coocorrência\n  - Barplot e radar chart de métricas por classe\n  - Curvas PR e ROC por classe (análise de thresholds)\n\nExemplos:\n  python train_gregor_samsa.py --train\n  python train_gregor_samsa.py --test\n  python train_gregor_samsa.py --train --validate\n",
+        description="Fine-tuning BERT multi-label (ToLD-BR) com splits persistentes.\n\nVisualizações geradas:\n  - Curvas de loss e F1-macro durante treino\n  - Matrizes de confusão por classe\n  - Heatmap de coocorrência\n  - Barplot e radar chart de métricas por classe\n  - Curvas PR e ROC por classe (análise de thresholds)\n  - Curvas F-beta × Threshold (otimização de limiares)\n\nExemplos:\n  python train_gregor_samsa.py --train\n  python train_gregor_samsa.py --test\n  python train_gregor_samsa.py --train --validate\n",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument('--train', action='store_true', help='Treina o modelo (gera splits se necessário)')
@@ -733,6 +1030,12 @@ def main():
         # model_outputs já contém as probabilidades
         plot_pr_roc_curves(y_true, model_outputs, LABELS)
         
+        # Curvas F-beta × Threshold
+        plot_fbeta_threshold_curves(y_true, model_outputs, LABELS)
+        
+        # Curvas F-beta × Threshold
+        plot_fbeta_threshold_curves(y_true, model_outputs, LABELS)
+        
     if args.test and not args.train:
         # Só testar (carrega modelo salvo)
         model_dir = MODEL_DIR
@@ -765,6 +1068,14 @@ def main():
         # Curvas PR e ROC (usando probabilidades, não predições binarizadas)
         # model_outputs já contém as probabilidades
         plot_pr_roc_curves(y_true, model_outputs, LABELS)
+
+        # Curvas F-beta × Threshold
+        plot_fbeta_threshold_curves(y_true, model_outputs, LABELS)
+        
+        # Curvas F-beta × Threshold
+        plot_fbeta_threshold_curves(y_true, model_outputs, LABELS)
+
+        
 
 if __name__ == "__main__":
     main()
