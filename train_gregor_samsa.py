@@ -288,7 +288,8 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
                max_seq_length: int = 80,
                do_lower_case: bool = True,
                output_dir: str = "outputs_bert/",
-               cache_dir: str = "cache_bert/"):
+               cache_dir: str = "cache_bert/",
+               best_model_dir: str = "outputs/best_model"):
     """
     Cria modelo com configuração de loss personalizada.
     
@@ -325,6 +326,7 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
     args.num_train_epochs = num_train_epochs
     args.max_seq_length = max_seq_length
     args.do_lower_case = do_lower_case
+    args.best_model_dir = best_model_dir
     
     # Configuração de loss e pos_weight
     loss_config = {}
@@ -1255,14 +1257,17 @@ def run_instance(instance: dict, instance_num: int, train_df, val_df, test_df):
     # Define subdiretórios
     output_dir = os.path.join(instance_dir, "outputs_bert")
     cache_dir = os.path.join(instance_dir, "cache_bert")
+    best_model_dir = os.path.join(instance_dir, "outputs/best_model")
     
     # Cria subdiretórios
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(best_model_dir, exist_ok=True)
     
     # Atualiza configuração com diretórios específicos da instância
     model_config['output_dir'] = output_dir
     model_config['cache_dir'] = cache_dir
+    model_config['best_model_dir'] = best_model_dir
     
     # Salva configuração da instância
     config_save_path = os.path.join(instance_dir, "instance_config.json")
