@@ -287,7 +287,8 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
                num_train_epochs: int = 3,
                max_seq_length: int = 80,
                do_lower_case: bool = True,
-               output_dir: str = "outputs_bert/"):
+               output_dir: str = "outputs_bert/",
+               cache_dir: str = "cache_bert/"):
     """
     Cria modelo com configuração de loss personalizada.
     
@@ -302,6 +303,7 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
         max_seq_length: Comprimento máximo da sequência
         do_lower_case: Se deve converter texto para minúsculas
         output_dir: Diretório de saída para o modelo
+        cache_dir: Diretório de cache para o modelo
     """
     args = MultiLabelClassificationArgs()
     args.manual_seed = SEED
@@ -310,7 +312,7 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
     args.use_multiprocessing_for_evaluation = False
     args.dataloader_num_workers = N_CPU
     args.output_dir = output_dir
-    args.cache_dir = "cache_bert/"
+    args.cache_dir = cache_dir
     args.num_labels = NUM_LABELS
     args.use_cuda   = False
     args.overwrite_output_dir = True
@@ -1246,17 +1248,30 @@ def run_instance(instance: dict, instance_num: int, train_df, val_df, test_df):
     # Parse configuração
     model_config, validate = parse_instance_config(instance, instance_num)
     
-    # Define diretório de saída único para esta instância
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(MODEL_DIR, f"{instance_id}_{timestamp}")
-    model_config['output_dir'] = output_dir
+    # Define diretório base para esta instância
+    instance_dir = instance_id
+    os.makedirs(instance_dir, exist_ok=True)
+    
+    # Define subdiretórios
+    output_dir = os.path.join(instance_dir, "outputs_bert")
+    cache_dir = os.path.join(instance_dir, "cache_bert")
+    
+    # Cria subdiretórios
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Atualiza configuração com diretórios específicos da instância
+    model_config['output_dir'] = output_dir
+    model_config['cache_dir'] = cache_dir
     
     # Salva configuração da instância
-    config_save_path = os.path.join(output_dir, "instance_config.json")
+    config_save_path = os.path.join(instance_dir, "instance_config.json")
     with open(config_save_path, 'w') as f:
         json.dump(instance, f, indent=2)
     print(f"💾 Configuração salva em: {config_save_path}")
+    print(f"📁 Diretório da instância: {instance_dir}/")
+    print(f"   - Modelo será salvo em: {output_dir}/")
+    print(f"   - Cache em: {cache_dir}/")
     
     # Calcula alpha para Focal Loss se necessário
     if model_config['use_focal_loss'] and model_config.get('focal_alpha', 'auto') == 'auto':
@@ -1276,7 +1291,7 @@ def run_instance(instance: dict, instance_num: int, train_df, val_df, test_df):
     result, model_outputs, wrong_preds = model.eval_model(test_df)
     
     # Salva resultados
-    results_path = os.path.join(output_dir, "test_results.json")
+    results_path = os.path.join(instance_dir, "test_results.json")
     with open(results_path, 'w') as f:
         json.dump(result, f, indent=2)
     
@@ -1285,35 +1300,35 @@ def run_instance(instance: dict, instance_num: int, train_df, val_df, test_df):
     
     # Gera visualizações
     print(f"\n📈 Gerando visualizações para {instance_id}...")
-    generate_all_plots_instance(test_df, model_outputs, output_dir)
+    generate_all_plots_instance(test_df, model_outputs, instance_dir)
     
-    print(f"\n✅ Instância {instance_id} concluída! Resultados em: {output_dir}")
+    print(f"\n✅ Instância {instance_id} concluída! Todos os arquivos em: {instance_dir}/")
     
     return result
 
-def generate_all_plots_instance(test_df, model_outputs, output_dir):
+def generate_all_plots_instance(test_df, model_outputs, instance_dir):
     """Gera todas as visualizações para uma instância específica."""
     y_true = list(test_df['labels'])
     y_pred = (np.array(model_outputs) >= 0.5).astype(int)
     
     # Atualiza caminhos para o diretório da instância
     plot_multilabel_confusion(y_true, y_pred, LABELS, 
-                             os.path.join(output_dir, "confusion_all_labels.png"))
+                             os.path.join(instance_dir, "confusion_all_labels.png"))
     
     plot_cooccurrence_heatmap(y_true, y_pred, LABELS,
-                             os.path.join(output_dir, "cooccurrence_heatmap.png"))
+                             os.path.join(instance_dir, "cooccurrence_heatmap.png"))
     
     plot_metrics_per_class(y_true, y_pred, LABELS,
-                          os.path.join(output_dir, "metrics_per_class_bar.png"),
-                          os.path.join(output_dir, "metrics_per_class_radar.png"))
+                          os.path.join(instance_dir, "metrics_per_class_bar.png"),
+                          os.path.join(instance_dir, "metrics_per_class_radar.png"))
     
     plot_pr_roc_curves(y_true, model_outputs, LABELS,
-                      os.path.join(output_dir, "pr_curves_per_class.png"),
-                      os.path.join(output_dir, "roc_curves_per_class.png"))
+                      os.path.join(instance_dir, "pr_curves_per_class.png"),
+                      os.path.join(instance_dir, "roc_curves_per_class.png"))
     
     plot_fbeta_threshold_curves(y_true, model_outputs, LABELS,
-                               os.path.join(output_dir, "fbeta_threshold_per_class.png"),
-                               os.path.join(output_dir, "fbeta_threshold_global.png"))
+                               os.path.join(instance_dir, "fbeta_threshold_per_class.png"),
+                               os.path.join(instance_dir, "fbeta_threshold_global.png"))
 
 def generate_summary_report(all_results: list, config_path: str):
     """
@@ -1324,7 +1339,7 @@ def generate_summary_report(all_results: list, config_path: str):
         config_path: Caminho do arquivo de configuração usado
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = os.path.join(MODEL_DIR, f"summary_report_{timestamp}.txt")
+    report_path = f"summary_report_{timestamp}.txt"
     
     with open(report_path, 'w') as f:
         f.write("="*80 + "\n")
@@ -1392,6 +1407,7 @@ Suporta três configurações de loss:
 3. Focal Loss com alpha automático ou manual
 
 Suporta execução de múltiplas configurações via arquivo JSON.
+Cada instância é salva em seu próprio diretório com todos os dados do modelo.
 
 Visualizações geradas:
 - Curvas de loss e F1-macro durante treino
