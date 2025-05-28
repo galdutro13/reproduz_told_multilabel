@@ -7,6 +7,7 @@ Suporta:
 - BCEWithLogitsLoss padrão (baseline)
 - BCEWithLogitsLoss com pos_weight customizado
 - Focal Loss com alpha automático ou manual
+- Execução de múltiplas configurações via arquivo JSON
 
 Visualizações incluídas:
 - Curvas de treino (loss/F1)
@@ -24,6 +25,8 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import json
+from datetime import datetime
 
 N_CPU = max(1, multiprocessing.cpu_count() - 1)
 os.environ.update({
@@ -280,7 +283,11 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
                use_focal_loss: bool = False,
                focal_gamma: float = 2.0,
                focal_alpha_weights: torch.Tensor = None,
-               pos_weight: list = None):
+               pos_weight: list = None,
+               num_train_epochs: int = 3,
+               max_seq_length: int = 80,
+               do_lower_case: bool = True,
+               output_dir: str = "outputs_bert/"):
     """
     Cria modelo com configuração de loss personalizada.
     
@@ -291,6 +298,10 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
         focal_gamma: Gamma para Focal Loss
         focal_alpha_weights: Pesos alpha para Focal Loss
         pos_weight: Pesos para BCE (ignorado se use_focal_loss=True)
+        num_train_epochs: Número de épocas de treino
+        max_seq_length: Comprimento máximo da sequência
+        do_lower_case: Se deve converter texto para minúsculas
+        output_dir: Diretório de saída para o modelo
     """
     args = MultiLabelClassificationArgs()
     args.manual_seed = SEED
@@ -298,7 +309,8 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
     args.use_multiprocessing = False
     args.use_multiprocessing_for_evaluation = False
     args.dataloader_num_workers = N_CPU
-    args.output_dir, args.cache_dir = "outputs_bert/", "cache_bert/"
+    args.output_dir = output_dir
+    args.cache_dir = "cache_bert/"
     args.num_labels = NUM_LABELS
     args.use_cuda   = False
     args.overwrite_output_dir = True
@@ -307,10 +319,10 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
     args.save_eval_checkpoints = True
     args.evaluate_during_training_steps = 150
     args.logging_steps = 150
-    args.tensorboard_dir = "runs/"
-    args.num_train_epochs = 3
-    args.max_seq_length = 80
-    args.do_lower_case = True
+    args.tensorboard_dir = os.path.join(output_dir, "runs/")
+    args.num_train_epochs = num_train_epochs
+    args.max_seq_length = max_seq_length
+    args.do_lower_case = do_lower_case
     
     # Configuração de loss e pos_weight
     loss_config = {}
@@ -440,7 +452,8 @@ def train_and_eval(df_train, df_val, model_config):
     """Treina e avalia modelo, plotando curvas de treino."""
     model, training_details = train(df_train, df_val, model_config, True)
     
-    plot_train_curves(training_details, "outputs_bert/loss_f1_vs_step.png")
+    output_dir = model_config.get('output_dir', MODEL_DIR)
+    plot_train_curves(training_details, os.path.join(output_dir, "loss_f1_vs_step.png"))
     return model
 
 def predict(model, textos):
@@ -1148,6 +1161,225 @@ def plot_pr_roc_curves(y_true, y_scores, labels,
     
     return metrics_df
 
+# ---------- Novas funções para suportar configurator.json -----------------
+def load_config_file(config_path: str) -> dict:
+    """Carrega e valida arquivo de configuração JSON."""
+    if not os.path.exists(config_path):
+        sys.exit(f"❌ Arquivo de configuração '{config_path}' não encontrado.")
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    except json.JSONDecodeError as e:
+        sys.exit(f"❌ Erro ao parsear JSON: {e}")
+    
+    if 'instances' not in config:
+        sys.exit("❌ Arquivo de configuração deve conter chave 'instances'.")
+    
+    return config
+
+def parse_instance_config(instance: dict, instance_num: int) -> dict:
+    """
+    Converte configuração de instância para formato esperado pelo modelo.
+    
+    Args:
+        instance: Dicionário com configuração da instância
+        instance_num: Número da instância (para identificação)
+    
+    Returns:
+        Dicionário com configuração do modelo
+    """
+    params = instance.get('parameters', {})
+    
+    # Validações básicas
+    if 'model_name' not in params:
+        sys.exit(f"❌ Instância {instance_num} ({instance.get('id', 'sem ID')}): "
+                f"'model_name' é obrigatório.")
+    
+    # Configuração base
+    model_config = {
+        'model_name': params['model_name'],
+        'use_focal_loss': params.get('use_focal_loss', False),
+        'focal_gamma': params.get('focal_gamma', 2.0),
+        'pos_weight': None,
+        'num_train_epochs': params.get('epochs', 3),
+        'max_seq_length': params.get('max_seq_length', 80),
+        'do_lower_case': params.get('do_lower_case', True)
+    }
+    
+    # Processa pos_weight se existir
+    if 'pos_weight' in params:
+        if isinstance(params['pos_weight'], list):
+            model_config['pos_weight'] = params['pos_weight']
+            if len(model_config['pos_weight']) != NUM_LABELS:
+                sys.exit(f"❌ Instância {instance_num}: pos_weight deve ter "
+                        f"{NUM_LABELS} valores, encontrados {len(model_config['pos_weight'])}")
+        else:
+            sys.exit(f"❌ Instância {instance_num}: pos_weight deve ser uma lista de números.")
+    
+    # Aviso sobre conflito focal loss + pos_weight
+    if model_config['use_focal_loss'] and model_config['pos_weight']:
+        print(f"\n⚠️  Instância {instance_num} ({instance.get('id', 'sem ID')}): "
+              f"Tanto use_focal_loss quanto pos_weight estão definidos. "
+              f"Focal Loss terá prioridade, pos_weight será ignorado.")
+        model_config['pos_weight'] = None
+    
+    return model_config, params.get('validate', True)
+
+def run_instance(instance: dict, instance_num: int, train_df, val_df, test_df):
+    """
+    Executa uma instância de treinamento.
+    
+    Args:
+        instance: Configuração da instância
+        instance_num: Número da instância
+        train_df, val_df, test_df: DataFrames com dados
+    """
+    instance_id = instance.get('id', f'instance_{instance_num}')
+    instance_name = instance.get('name', 'Sem nome')
+    
+    print("\n" + "="*80)
+    print(f"🚀 EXECUTANDO INSTÂNCIA {instance_num}: {instance_id}")
+    print(f"📝 Descrição: {instance_name}")
+    print("="*80)
+    
+    # Parse configuração
+    model_config, validate = parse_instance_config(instance, instance_num)
+    
+    # Define diretório de saída único para esta instância
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(MODEL_DIR, f"{instance_id}_{timestamp}")
+    model_config['output_dir'] = output_dir
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Salva configuração da instância
+    config_save_path = os.path.join(output_dir, "instance_config.json")
+    with open(config_save_path, 'w') as f:
+        json.dump(instance, f, indent=2)
+    print(f"💾 Configuração salva em: {config_save_path}")
+    
+    # Calcula alpha para Focal Loss se necessário
+    if model_config['use_focal_loss'] and model_config.get('focal_alpha', 'auto') == 'auto':
+        alpha_weights = calculate_class_weights(train_df)
+        model_config['focal_alpha_weights'] = alpha_weights
+    else:
+        model_config['focal_alpha_weights'] = None
+    
+    # Treina modelo
+    if validate:
+        model = train_and_eval(train_df, val_df, model_config)
+    else:
+        model, _ = train(train_df, val_df, model_config)
+    
+    # Avalia no conjunto de teste
+    print(f"\n📊 Avaliação no conjunto de teste para {instance_id}:")
+    result, model_outputs, wrong_preds = model.eval_model(test_df)
+    
+    # Salva resultados
+    results_path = os.path.join(output_dir, "test_results.json")
+    with open(results_path, 'w') as f:
+        json.dump(result, f, indent=2)
+    
+    for k, v in result.items():
+        print(f"  {k}: {v:.4f}")
+    
+    # Gera visualizações
+    print(f"\n📈 Gerando visualizações para {instance_id}...")
+    generate_all_plots_instance(test_df, model_outputs, output_dir)
+    
+    print(f"\n✅ Instância {instance_id} concluída! Resultados em: {output_dir}")
+    
+    return result
+
+def generate_all_plots_instance(test_df, model_outputs, output_dir):
+    """Gera todas as visualizações para uma instância específica."""
+    y_true = list(test_df['labels'])
+    y_pred = (np.array(model_outputs) >= 0.5).astype(int)
+    
+    # Atualiza caminhos para o diretório da instância
+    plot_multilabel_confusion(y_true, y_pred, LABELS, 
+                             os.path.join(output_dir, "confusion_all_labels.png"))
+    
+    plot_cooccurrence_heatmap(y_true, y_pred, LABELS,
+                             os.path.join(output_dir, "cooccurrence_heatmap.png"))
+    
+    plot_metrics_per_class(y_true, y_pred, LABELS,
+                          os.path.join(output_dir, "metrics_per_class_bar.png"),
+                          os.path.join(output_dir, "metrics_per_class_radar.png"))
+    
+    plot_pr_roc_curves(y_true, model_outputs, LABELS,
+                      os.path.join(output_dir, "pr_curves_per_class.png"),
+                      os.path.join(output_dir, "roc_curves_per_class.png"))
+    
+    plot_fbeta_threshold_curves(y_true, model_outputs, LABELS,
+                               os.path.join(output_dir, "fbeta_threshold_per_class.png"),
+                               os.path.join(output_dir, "fbeta_threshold_global.png"))
+
+def generate_summary_report(all_results: list, config_path: str):
+    """
+    Gera relatório resumido de todas as instâncias executadas.
+    
+    Args:
+        all_results: Lista de tuplas (instance_info, results)
+        config_path: Caminho do arquivo de configuração usado
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = os.path.join(MODEL_DIR, f"summary_report_{timestamp}.txt")
+    
+    with open(report_path, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("RELATÓRIO RESUMIDO - EXECUÇÃO DE MÚLTIPLAS INSTÂNCIAS\n")
+        f.write("="*80 + "\n")
+        f.write(f"Data/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Arquivo de configuração: {config_path}\n")
+        f.write(f"Total de instâncias: {len(all_results)}\n")
+        f.write("\n")
+        
+        # Tabela comparativa
+        f.write("RESULTADOS COMPARATIVOS:\n")
+        f.write("-"*80 + "\n")
+        f.write(f"{'ID':<15} {'Nome':<30} {'F1-Macro':<10} {'Hamming':<10} {'Avg Prec':<10}\n")
+        f.write("-"*80 + "\n")
+        
+        best_f1_instance = None
+        best_f1_score = -1
+        
+        for instance_info, results in all_results:
+            instance_id = instance_info.get('id', 'N/A')
+            instance_name = instance_info.get('name', 'N/A')[:30]
+            f1_score = results.get('macro_f1', 0)
+            hamming = results.get('hamming_loss', 1)
+            avg_prec = results.get('avg_precision', 0)
+            
+            f.write(f"{instance_id:<15} {instance_name:<30} "
+                   f"{f1_score:<10.4f} {hamming:<10.4f} {avg_prec:<10.4f}\n")
+            
+            if f1_score > best_f1_score:
+                best_f1_score = f1_score
+                best_f1_instance = instance_info
+        
+        f.write("-"*80 + "\n")
+        f.write(f"\n🏆 MELHOR INSTÂNCIA (F1-Macro): {best_f1_instance.get('id', 'N/A')} "
+               f"com score {best_f1_score:.4f}\n")
+        
+        # Detalhes de cada instância
+        f.write("\n\nDETALHES POR INSTÂNCIA:\n")
+        f.write("="*80 + "\n")
+        
+        for instance_info, results in all_results:
+            f.write(f"\nInstância: {instance_info.get('id', 'N/A')}\n")
+            f.write(f"Nome: {instance_info.get('name', 'N/A')}\n")
+            f.write("Parâmetros:\n")
+            params = instance_info.get('parameters', {})
+            for key, value in params.items():
+                f.write(f"  - {key}: {value}\n")
+            f.write("Resultados:\n")
+            for metric, value in results.items():
+                f.write(f"  - {metric}: {value:.4f}\n")
+            f.write("-"*40 + "\n")
+    
+    print(f"\n📄 Relatório resumido salvo em: {report_path}")
+
 # ---------- Main com argparse ---------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
@@ -1158,6 +1390,8 @@ Suporta três configurações de loss:
 1. BCEWithLogitsLoss padrão (baseline)
 2. BCEWithLogitsLoss com pos_weight customizado  
 3. Focal Loss com alpha automático ou manual
+
+Suporta execução de múltiplas configurações via arquivo JSON.
 
 Visualizações geradas:
 - Curvas de loss e F1-macro durante treino
@@ -1180,8 +1414,8 @@ Exemplos de uso:
   # Com Focal Loss customizado
   python train_unified.py --train --use-focal-loss --focal-gamma 1.5
   
-  # Modelo customizado
-  python train_unified.py --train --model-name "bert-base-uncased"
+  # Executar múltiplas configurações de arquivo JSON
+  python train_unified.py --config configurator.json
   
   # Só testar modelo salvo
   python train_unified.py --test
@@ -1215,10 +1449,60 @@ Exemplos de uso:
                        help='Alpha para Focal Loss: "auto" (calculado automaticamente) '
                             'ou "none" (sem balanceamento)')
     
+    # Novo argumento para arquivo de configuração
+    parser.add_argument('--config', type=str, metavar='CONFIG_FILE',
+                       help='Arquivo JSON com múltiplas configurações para executar sequencialmente')
+    
     args = parser.parse_args()
 
+    # Se --config for especificado, ignora outros argumentos e executa configurações
+    if args.config:
+        print(f"\n🔧 Modo de configuração múltipla ativado")
+        print(f"📁 Carregando configurações de: {args.config}")
+        
+        config = load_config_file(args.config)
+        instances = config['instances']
+        
+        print(f"\n📋 {len(instances)} instâncias encontradas para execução")
+        
+        # Carregar ou gerar splits (uma vez para todas as instâncias)
+        train_df = load_split('train')
+        val_df   = load_split('val')
+        test_df  = load_split('test')
+        
+        if train_df is None or test_df is None or val_df is None:
+            print("\nGerando splits e salvando em disco…")
+            full_data = load_dataset(DATASET_PATH)
+            train_df, val_df, test_df = split_stratified_holdout(full_data)
+            save_split(train_df, 'train')
+            save_split(val_df,   'val')
+            save_split(test_df,  'test')
+        else:
+            print("Splits carregados do disco.")
+        
+        # Executa cada instância
+        all_results = []
+        for i, instance in enumerate(instances, 1):
+            try:
+                results = run_instance(instance, i, train_df, val_df, test_df)
+                all_results.append((instance, results))
+            except Exception as e:
+                print(f"\n❌ Erro na instância {i} ({instance.get('id', 'sem ID')}): {e}")
+                print("Continuando com próxima instância...")
+                continue
+        
+        # Gera relatório resumido
+        if all_results:
+            generate_summary_report(all_results, args.config)
+            print(f"\n✅ Execução completa! {len(all_results)} instâncias processadas com sucesso.")
+        else:
+            print("\n❌ Nenhuma instância foi executada com sucesso.")
+        
+        return
+
+    # Comportamento original (sem --config)
     if not (args.train or args.test):
-        print("\n⚠️  Nenhum parâmetro passado! Use --train, --test ou ambos.\n")
+        print("\n⚠️  Nenhum parâmetro passado! Use --train, --test, --config ou veja --help.\n")
         parser.print_help()
         return
 
