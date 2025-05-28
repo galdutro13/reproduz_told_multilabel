@@ -3,6 +3,7 @@
 /outputs_bert
 /runs
 /outputs 
+/I0*
 
 split_test.csv
 split_train.csv

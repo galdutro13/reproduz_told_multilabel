@@ -1,0 +1,15 @@
+{
+    "instances": [
+        {
+            "id": "I001",
+            "name": "running baseline training",
+            "parameters": {
+                "model_name": "google-bert/bert-base-multilingual-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false
+            }
+        }
+    ]
+}
