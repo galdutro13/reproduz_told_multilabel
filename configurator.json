@@ -1,0 +1,40 @@
+{
+    "instances": [
+        {
+            "id": "I001",
+            "name": "running baseline training",
+            "parameters": {
+                "model_name": "neuralmind/bert-base-portuguese-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false
+            }
+        },
+        {
+            "id": "I002",
+            "name": "running baseline training with focal loss",
+            "parameters": {
+                "model_name": "neuralmind/bert-base-portuguese-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false,
+                "use_focal_loss": true
+            }
+        },
+        {
+            "id": "I003",
+            "name": "running baseline training with focal loss and ",
+            "parameters": {
+                "model_name": "neuralmind/bert-base-portuguese-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false,
+                "use_focal_loss": true,
+                ""
+            }
+        }
+    ]
+}

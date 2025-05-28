@@ -175,7 +175,7 @@ def make_model(evaluate_during_training: bool = True):
     
 
     model = MultiLabelClassificationModel(
-        "bert", MODEL_NAME, num_labels=NUM_LABELS, args=args, use_cuda=False
+        "bert", MODEL_NAME, num_labels=NUM_LABELS, args=args, use_cuda=False, pos_weight=[7.75, 1.47, 1.95, 12.30, 6.66, 11.75]
     )
 
     # ---- IPEX ------------------------------------------------------------
