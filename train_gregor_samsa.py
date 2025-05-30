@@ -338,6 +338,10 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
         focal_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha_weights, reduction='mean')
         args.loss_function = focal_loss
         print(f"✨ Focal Loss configurada com gamma={focal_gamma}")
+
+         # DEBUG: Verificar se a loss function foi realmente atribuída
+        print(f"🔍 DEBUG: args.loss_function = {args.loss_function}")
+        print(f"🔍 DEBUG: type(args.loss_function) = {type(args.loss_function)}")
         if focal_alpha_weights is not None:
             print("   Alpha automático calculado baseado na frequência das classes")
         else:
@@ -351,9 +355,23 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
         print("📊 BCEWithLogitsLoss padrão (baseline)")
 
     # Criar modelo
-    model = MultiLabelClassificationModel(
-        "bert", model_name, num_labels=NUM_LABELS, args=args, use_cuda=False, **loss_config
-    )
+    if pos_weight and not use_focal_loss:
+        # Só passa loss_config quando tem pos_weight
+        model = MultiLabelClassificationModel(
+            "bert", model_name, num_labels=NUM_LABELS, args=args, use_cuda=False, **loss_config
+        )
+    else:
+        # Para Focal Loss ou BCE padrão, não passa loss_config
+        model = MultiLabelClassificationModel(
+            "bert", model_name, num_labels=NUM_LABELS, args=args, use_cuda=False
+        )
+
+    print("DEBUG: Verificando a loss function logo após a instanciação do modelo - ~linha 362")
+    # DEBUG: Verificar se o modelo está usando a loss function correta
+    if hasattr(model, 'loss_fct'):
+        print(f"🔍 DEBUG: model.loss_fct = {model.loss_fct}")
+    if hasattr(model.model, 'loss_fct'):
+        print(f"🔍 DEBUG: model.model.loss_fct = {model.model.loss_fct}")
 
     # ---- IPEX ------------------------------------------------------------
     try:
@@ -387,6 +405,12 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
         except Exception as e:
             warnings.warn(f"torch.compile falhou — desativado: {e}")
 
+    print("DEBUG: Verificando a loss function após a compilação e otimização do modelo - ~linha 401")
+    # DEBUG: Verificar se o modelo está usando a loss function correta
+    if hasattr(model, 'loss_fct'):
+        print(f"🔍 DEBUG: model.loss_fct = {model.loss_fct}")
+    if hasattr(model.model, 'loss_fct'):
+        print(f"🔍 DEBUG: model.model.loss_fct = {model.model.loss_fct}")
     return model
 
 # ---------- 4 | Execução --------------------------------------------------

@@ -4,6 +4,7 @@
 /runs
 /outputs 
 /I0*
+/wandb
 
 split_test.csv
 split_train.csv
