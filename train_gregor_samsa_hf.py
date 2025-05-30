@@ -65,8 +65,15 @@ from transformers import (
     Trainer,
     EvalPrediction,
     set_seed,
-    logging as hf_logging
+    logging as hf_logging,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState
 )
+from transformers.trainer_utils import get_last_checkpoint
+from transformers.integrations import TensorBoardCallback
+from tqdm.auto import tqdm
+
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from transformers import get_linear_schedule_with_warmup
@@ -89,6 +96,74 @@ SEED = 42
 
 # Setar seed global
 set_seed(SEED)
+
+# ---------- Adicionar após as importações --------------------------------
+class ProgressCallback(TrainerCallback):
+    """Callback customizado para mostrar progresso detalhado."""
+    
+    def __init__(self):
+        self.training_bar = None
+        self.epoch_bar = None
+        self.current_epoch = 0
+        
+    def on_train_begin(self, args, state, control, **kwargs):
+        """Inicializa barras de progresso."""
+        self.epoch_bar = tqdm(
+            total=args.num_train_epochs,
+            desc="Épocas",
+            position=0,
+            leave=True,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+        )
+        self.current_epoch = 0
+        
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        """Início de uma nova época."""
+        if state.epoch is not None:
+            self.current_epoch = int(state.epoch)
+            self.epoch_bar.update(self.current_epoch - self.epoch_bar.n)
+            
+        # Criar barra para batches
+        total_steps = len(kwargs['train_dataloader'])
+        self.training_bar = tqdm(
+            total=total_steps,
+            desc=f"Época {self.current_epoch + 1}/{args.num_train_epochs}",
+            position=1,
+            leave=False,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+        )
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        """Atualiza barra de progresso após cada step."""
+        if self.training_bar is not None:
+            # Atualizar com métricas
+            current_loss = state.log_history[-1].get('loss', 0) if state.log_history else 0
+            lr = state.log_history[-1].get('learning_rate', 0) if state.log_history else 0
+            
+            self.training_bar.set_postfix({
+                'loss': f'{current_loss:.4f}',
+                'lr': f'{lr:.2e}'
+            })
+            self.training_bar.update(1)
+            
+    def on_epoch_end(self, args, state, control, **kwargs):
+        """Finaliza época."""
+        if self.training_bar is not None:
+            self.training_bar.close()
+            
+        # Mostrar métricas de validação se disponíveis
+        if state.log_history and 'eval_loss' in state.log_history[-1]:
+            eval_metrics = state.log_history[-1]
+            print(f"\n📊 Métricas Época {self.current_epoch + 1}: "
+                  f"eval_loss={eval_metrics.get('eval_loss', 0):.4f}, "
+                  f"macro_f1={eval_metrics.get('eval_macro_f1', 0):.4f}, "
+                  f"avg_precision={eval_metrics.get('eval_avg_precision', 0):.4f}")
+            
+    def on_train_end(self, args, state, control, **kwargs):
+        """Finaliza treinamento."""
+        if self.epoch_bar is not None:
+            self.epoch_bar.close()
+        print("\n✅ Treinamento concluído!")
 
 # ---------- 1.5 | Implementação de Loss Functions -------------------------
 class FocalLoss(nn.Module):
@@ -163,6 +238,7 @@ class MultiLabelDataset(Dataset):
         }
 
 # ---------- 3 | Configuração do Modelo -----------------------------------
+# ---------- Modificar ModelConfig para incluir configurações de display ---
 @dataclass
 class ModelConfig:
     """Configuração do modelo e treinamento."""
@@ -182,7 +258,7 @@ class ModelConfig:
     evaluation_strategy: str = "steps"
     eval_steps: int = 350
     save_steps: int = 350
-    logging_steps: int = 350
+    logging_steps: int = 50  # Reduzido para atualizar mais frequentemente
     save_total_limit: int = 3
     load_best_model_at_end: bool = True
     metric_for_best_model: str = "avg_precision"
@@ -192,6 +268,8 @@ class ModelConfig:
     focal_alpha_weights: Optional[torch.Tensor] = None
     pos_weight: Optional[List[float]] = None
     dataloader_num_workers: int = N_CPU
+    disable_tqdm: bool = False  # Para controlar barras de progresso
+    logging_first_step: bool = True
     
     def to_training_args(self) -> TrainingArguments:
         """Converte para TrainingArguments do HF."""
@@ -205,6 +283,7 @@ class ModelConfig:
             learning_rate=self.learning_rate,
             logging_dir=os.path.join(self.output_dir, "runs"),
             logging_steps=self.logging_steps,
+            logging_first_step=self.logging_first_step,
             evaluation_strategy=self.evaluation_strategy,
             eval_steps=self.eval_steps,
             save_steps=self.save_steps,
@@ -216,6 +295,9 @@ class ModelConfig:
             dataloader_num_workers=self.dataloader_num_workers,
             remove_unused_columns=False,
             label_names=["labels"],
+            disable_tqdm=self.disable_tqdm,
+            report_to=["tensorboard"],  # Para salvar logs no TensorBoard
+            run_name=f"bert_multilabel_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
 
 # ---------- 4 | Trainer Customizado --------------------------------------
@@ -249,12 +331,6 @@ class MultiLabelTrainer(Trainer):
         logits = outputs.get('logits')
         loss = self.loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
-    
-    def log(self, logs: Dict[str, float]) -> None:
-        """Override para adicionar logging customizado."""
-        if self.state.epoch is not None:
-            logs["epoch"] = round(self.state.epoch, 2)
-        super().log(logs)
 
 # ---------- 5 | Métricas -------------------------------------------------
 from sklearn.metrics import f1_score, hamming_loss, average_precision_score
@@ -378,18 +454,11 @@ def create_model(config: ModelConfig):
         cache_dir=config.cache_dir
     )
     
-    # Aplicar otimizações se disponíveis
-    try:
-        import intel_extension_for_pytorch as ipex
-        model = ipex.optimize(model, dtype=torch.float32)
-        logger.info("🚀 IPEX otimizado (FP32)")
-    except ImportError:
-        logger.info("ℹ️ IPEX não disponível")
     
     # torch.compile se disponível
     if hasattr(torch, 'compile'):
         try:
-            model = torch.compile(model, backend='ipex', mode='default')
+            model = torch.compile(model, backend='ipex')
             logger.info("🛠️ torch.compile ativado")
         except Exception as e:
             logger.warning(f"torch.compile falhou: {e}")
@@ -399,10 +468,17 @@ def create_model(config: ModelConfig):
 def train_model(train_df: pd.DataFrame, val_df: pd.DataFrame, 
                 config: ModelConfig) -> Tuple[Any, Dict[str, List[float]]]:
     """Treina o modelo e retorna o trainer e histórico."""
+    print("\n🚀 Iniciando treinamento...")
+    print(f"📊 Dados: {len(train_df)} amostras de treino, {len(val_df)} amostras de validação")
+    print(f"⚙️  Configuração: {config.num_train_epochs} épocas, "
+          f"batch_size={config.per_device_train_batch_size}, "
+          f"lr={config.learning_rate}")
+    
     # Criar modelo e tokenizer
     model, tokenizer = create_model(config)
     
     # Criar datasets
+    print("\n📝 Criando datasets...")
     train_dataset = MultiLabelDataset(
         train_df['text'].tolist(),
         train_df['labels'].tolist(),
@@ -425,8 +501,11 @@ def train_model(train_df: pd.DataFrame, val_df: pd.DataFrame,
         'pos_weight': config.pos_weight
     }
     
-    # Criar trainer
+    # Criar trainer com callbacks
     training_args = config.to_training_args()
+    
+    # Callbacks
+    progress_callback = ProgressCallback()
     
     trainer = MultiLabelTrainer(
         loss_config=loss_config,
@@ -436,13 +515,21 @@ def train_model(train_df: pd.DataFrame, val_df: pd.DataFrame,
         eval_dataset=val_dataset if config.evaluate_during_training else None,
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
+        callbacks=[progress_callback]  # Adicionar callback de progresso
     )
     
+    # Calcular steps totais para informação
+    total_steps = len(train_dataset) // config.per_device_train_batch_size * config.num_train_epochs
+    print(f"\n📈 Total de steps: {total_steps}")
+    print(f"📊 Avaliação a cada {config.eval_steps} steps")
+    print(f"💾 Salvamento a cada {config.save_steps} steps")
+    print("\n" + "="*80 + "\n")
+    
     # Treinar
-    logger.info("Iniciando treinamento...")
     train_result = trainer.train()
     
     # Salvar modelo
+    print("\n💾 Salvando modelo...")
     trainer.save_model()
     trainer.save_state()
     
@@ -461,23 +548,45 @@ def train_model(train_df: pd.DataFrame, val_df: pd.DataFrame,
             history['global_step'].append(log.get('step', 0))
             history['train_loss'].append(log['loss'])
         if 'eval_loss' in log:
-            history['eval_loss'].append(log['eval_loss'])
-            history['macro_f1'].append(log.get('eval_macro_f1', 0))
-            history['hamming_loss'].append(log.get('eval_hamming_loss', 0))
-            history['avg_precision'].append(log.get('eval_avg_precision', 0))
+            # Garantir que temos o mesmo número de steps
+            if len(history['eval_loss']) < len(history['global_step']):
+                history['eval_loss'].append(log['eval_loss'])
+                history['macro_f1'].append(log.get('eval_macro_f1', 0))
+                history['hamming_loss'].append(log.get('eval_hamming_loss', 0))
+                history['avg_precision'].append(log.get('eval_avg_precision', 0))
+    
+    # Imprimir resumo final
+    print("\n" + "="*80)
+    print("📊 RESUMO DO TREINAMENTO")
+    print("="*80)
+    print(f"✅ Treinamento concluído em {train_result.metrics['train_runtime']:.2f} segundos")
+    print(f"📈 Loss final de treino: {train_result.metrics['train_loss']:.4f}")
+    if history['eval_loss']:
+        print(f"📊 Melhor loss de validação: {min(history['eval_loss']):.4f}")
+        print(f"🎯 Melhor F1-Macro: {max(history['macro_f1']):.4f}")
+        print(f"🎯 Melhor Avg Precision: {max(history['avg_precision']):.4f}")
     
     return trainer, history
 
 def evaluate_model(trainer: Any, test_df: pd.DataFrame) -> Tuple[Dict[str, float], np.ndarray]:
-    """Avalia o modelo no conjunto de teste."""
+    """Avalia o modelo no conjunto de teste com barra de progresso."""
+    print("\n🧪 Avaliando modelo no conjunto de teste...")
+    
     test_dataset = MultiLabelDataset(
         test_df['text'].tolist(),
         test_df['labels'].tolist(),
         trainer.tokenizer,
-        trainer.args.model.config.max_seq_length if hasattr(trainer.args, 'model') else 128
+        trainer.args.max_seq_length if hasattr(trainer.args, 'max_seq_length') else 128
     )
     
-    predictions = trainer.predict(test_dataset)
+    # Usar tqdm para mostrar progresso da predição
+    print(f"📊 Processando {len(test_dataset)} amostras...")
+    
+    # Fazer predições com progresso
+    predictions = trainer.predict(
+        test_dataset,
+        metric_key_prefix="test"
+    )
     
     # Extrair logits e aplicar sigmoid
     logits = predictions.predictions
@@ -486,7 +595,10 @@ def evaluate_model(trainer: Any, test_df: pd.DataFrame) -> Tuple[Dict[str, float
     # Calcular métricas
     metrics = compute_metrics(EvalPrediction(predictions=logits, label_ids=predictions.label_ids))
     
-    return metrics, probs
+    # Adicionar prefixo 'test_' às métricas
+    test_metrics = {f"test_{k}": v for k, v in metrics.items()}
+    
+    return test_metrics, probs
 
 # ---------- 8 | Visualizações (mantidas do original) --------------------
 # [Todas as funções de plotagem do código original permanecem as mesmas]
@@ -646,6 +758,9 @@ Exemplos de uso:
         """,
         formatter_class=argparse.RawTextHelpFormatter
     )
+
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
     
     parser.add_argument('--train', action='store_true', help='Treina o modelo')
     parser.add_argument('--test', action='store_true', help='Testa o modelo salvo')

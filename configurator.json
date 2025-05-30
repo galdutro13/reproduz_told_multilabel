@@ -1,6 +1,18 @@
 {
     "instances": [
         {
+            "id": "I001",
+            "name": "running baseline training with focal loss",
+            "parameters": {
+                "model_name": "google-bert/bert-base-multilingual-cased",
+                "validate": true,
+                "epochs": 5,
+                "max_seq_length": 128,
+                "do_lower_case": false,
+                "use_focal_loss": false
+            }
+        },
+        {
             "id": "I002",
             "name": "running baseline training with focal loss",
             "parameters": {
@@ -33,7 +45,8 @@
                 "validate": true,
                 "epochs": 5,
                 "max_seq_length": 128,
-                "do_lower_case": true
+                "do_lower_case": true,
+                "use_focal_loss": false
             }
         },
         {
