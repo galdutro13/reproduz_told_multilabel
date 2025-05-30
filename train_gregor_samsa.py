@@ -320,13 +320,16 @@ def make_model(model_name: str = DEFAULT_MODEL_NAME,
     args.evaluate_during_training = evaluate_during_training
     args.evaluate_during_training_verbose = True
     args.save_eval_checkpoints = True
-    args.evaluate_during_training_steps = 150
-    args.logging_steps = 150
+    args.evaluate_during_training_steps = 350
+    args.logging_steps = 350
     args.tensorboard_dir = os.path.join(output_dir, "runs/")
     args.num_train_epochs = num_train_epochs
     args.max_seq_length = max_seq_length
     args.do_lower_case = do_lower_case
     args.best_model_dir = best_model_dir
+    args.use_early_stopping = True
+    args.early_stopping_metric = "avg_precision"
+    args.early_stopping_metric_minimize = False
     
     # Configuração de loss e pos_weight
     loss_config = {}
