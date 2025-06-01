@@ -6,7 +6,7 @@
             "parameters": {
                 "model_name": "google-bert/bert-base-multilingual-cased",
                 "validate": true,
-                "epochs": 5,
+                "epochs": 1,
                 "max_seq_length": 128,
                 "do_lower_case": false,
                 "use_focal_loss": false
