@@ -10,15 +10,14 @@ from typing import Dict, List, Any, Optional
 from dataclasses import asdict
 import logging
 from datetime import datetime
+import numpy as np # Adicionado para checar o tipo ndarray
 
-from src.config import ModelConfig, LossConfig, DATASET_PATH, NUM_LABELS # IMPORTAR NUM_LABELS
-# Adicionada vírgula e NUM_LABELS acima
+from src.config import ModelConfig, LossConfig, DATASET_PATH, NUM_LABELS 
 
 logger = logging.getLogger(__name__)
 
 class ConfigurationManager:
-    """Gerenciador de configurações múltiplas."""
-    
+    # ... (código da ConfigurationManager permanece o mesmo) ...
     @staticmethod
     def load_config_file(config_path: str) -> Dict[str, Any]:
         """
@@ -203,6 +202,8 @@ class InstanceExecutor:
             
         except Exception as e:
             logger.error(f"❌ Erro na instância {instance_id}: {e}")
+            # Adicionar traceback ao log para facilitar o debug
+            logger.exception(f"Traceback do erro na instância {instance_id}:")
             return {'error': str(e), 'instance_id': instance_id}
     
     def _run_training_pipeline(self, model_config: ModelConfig, loss_config: LossConfig,
@@ -213,18 +214,15 @@ class InstanceExecutor:
         from src.data import MultiLabelDataset, calculate_class_weights
         from src.training import TrainingManager
         from src.metrics import DetailedMetricsAnalyzer
-        from src.visualization import VisualizationSuite
+        from src.visualization import VisualizationSuite # Supondo que este é o nome correto
         import torch
         
         # Criar modelo e tokenizer
         model, tokenizer = ModelFactory.create_model_and_tokenizer(model_config)
-        
-        # CORREÇÃO APLICADA AQUI:
-        # Usar NUM_LABELS importado de src.config para a validação.
         ModelValidator.validate_model_config(model, NUM_LABELS) 
         
         # Calcular alpha weights se necessário
-        if loss_config.use_focal_loss:
+        if loss_config.use_focal_loss and loss_config.focal_alpha_weights is None: # Modificado para checar se já não foi setado
             loss_config.focal_alpha_weights = calculate_class_weights(train_df)
         
         # Criar datasets
@@ -258,13 +256,51 @@ class InstanceExecutor:
         test_metrics, test_probs = training_manager.evaluate(test_dataset)
         
         # Análise detalhada
-        y_true = torch.stack([test_dataset[i]['labels'] for i in range(len(test_dataset))]).numpy()
-        y_pred = (test_probs >= 0.5).astype(int)
+        y_true_list = [test_dataset[i]['labels'] for i in range(len(test_dataset))]
+        if not y_true_list: # Checagem de segurança
+            logger.error("❌ Test dataset resultou em y_true vazio. Impossível continuar com análise detalhada e visualizações.")
+            raise ValueError("y_true está vazio após coleta do test_dataset.")
+
+        y_true = torch.stack(y_true_list).numpy()
+        y_pred = (test_probs >= 0.5).astype(int) # Thresholding padrão
         
         analyzer = DetailedMetricsAnalyzer()
         detailed_metrics = analyzer.calculate_detailed_metrics(y_true, y_pred, test_probs)
         
+        # ---- INÍCIO DO CÓDIGO DE DEBUG ----
+        logger.info("---- DEBUG: Informações para VisualizationSuite.generate_all_plots ----")
+        if training_history:
+            for key, value in training_history.items():
+                if isinstance(value, list):
+                    logger.info(f"DEBUG: training_history['{key}'] length: {len(value)}")
+                else:
+                    logger.info(f"DEBUG: training_history['{key}'] type: {type(value)} value: {value}")
+        else:
+            logger.info("DEBUG: training_history está vazio ou None.")
+
+        logger.info(f"DEBUG: y_true length: {len(y_true) if y_true is not None else 'None'}")
+        if isinstance(y_true, np.ndarray):
+            logger.info(f"DEBUG: y_true shape: {y_true.shape}")
+
+        logger.info(f"DEBUG: y_pred length: {len(y_pred) if y_pred is not None else 'None'}")
+        if isinstance(y_pred, np.ndarray):
+            logger.info(f"DEBUG: y_pred shape: {y_pred.shape}")
+            
+        logger.info(f"DEBUG: test_probs length: {len(test_probs) if test_probs is not None else 'None'}")
+        if isinstance(test_probs, np.ndarray):
+            logger.info(f"DEBUG: test_probs shape: {test_probs.shape}")
+
+        if detailed_metrics and 'per_class_metrics' in detailed_metrics:
+            logger.info(f"DEBUG: detailed_metrics['per_class_metrics'] type: {type(detailed_metrics['per_class_metrics'])}")
+            if isinstance(detailed_metrics['per_class_metrics'], (dict, list)):
+                 logger.info(f"DEBUG: detailed_metrics['per_class_metrics'] length/keys: {len(detailed_metrics['per_class_metrics'])}")
+        else:
+            logger.info("DEBUG: detailed_metrics['per_class_metrics'] não disponível.")
+        logger.info("---- FIM DO CÓDIGO DE DEBUG ----")
+        # ---- FIM DO CÓDIGO DE DEBUG ----
+        
         # Visualizações
+        # Supondo que VisualizationSuite está em src.visualization
         viz_suite = VisualizationSuite(os.path.join(instance_dir, "visualizations"))
         optimal_thresholds = viz_suite.generate_all_plots(
             training_history, y_true, y_pred, test_probs, 
@@ -276,9 +312,10 @@ class InstanceExecutor:
             'instance_id': instance_id,
             'test_metrics': test_metrics,
             'detailed_metrics': detailed_metrics,
-            'optimal_thresholds': optimal_thresholds,
+            'optimal_thresholds': optimal_thresholds, # Assegure que isso é serializável
             'training_time': train_result.metrics.get('train_runtime', 0),
-            'best_eval_metric': max(training_history.get('avg_precision', [0])) if training_history.get('avg_precision') else None
+            'best_eval_metric': (max(training_history.get('eval_avg_precision', [0.0])) # Chave atualizada e default
+                                if training_history.get('eval_avg_precision') else None)
         }
         
         # Salvar resultados
@@ -289,6 +326,12 @@ class InstanceExecutor:
     def _save_instance_config(self, instance: Dict, model_config: ModelConfig, 
                             loss_config: LossConfig, instance_dir: str):
         """Salva configuração completa da instância."""
+        # Garantir que focal_alpha_weights e pos_weight sejam listas (ou None) para JSON
+        if isinstance(loss_config.focal_alpha_weights, torch.Tensor):
+            loss_config.focal_alpha_weights = loss_config.focal_alpha_weights.tolist()
+        if isinstance(loss_config.pos_weight, torch.Tensor): # Adicionado para pos_weight
+            loss_config.pos_weight = loss_config.pos_weight.tolist()
+
         config_data = {
             'original_instance': instance,
             'model_config': asdict(model_config),
@@ -304,12 +347,20 @@ class InstanceExecutor:
         """Salva resultados da execução."""
         # Converter tensors numpy para listas para serialização JSON
         def convert_for_json(obj):
-            if hasattr(obj, 'tolist'):  # numpy arrays
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, torch.Tensor):
                 return obj.tolist()
             elif isinstance(obj, dict):
                 return {k: convert_for_json(v) for k, v in obj.items()}
             elif isinstance(obj, list):
                 return [convert_for_json(item) for item in obj]
+            elif isinstance(obj, (datetime, np.datetime64)): # Adicionado para datetime
+                return obj.isoformat()
             else:
                 return obj
         
@@ -320,8 +371,7 @@ class InstanceExecutor:
             json.dump(serializable_results, f, indent=2, ensure_ascii=False)
 
 class BatchExecutor:
-    """Executor para múltiplas instâncias."""
-    
+    # ... (código da BatchExecutor permanece o mesmo, mas certifique-se de que as métricas no relatório são robustas) ...
     def __init__(self, dataset_path: str = DATASET_PATH):
         self.dataset_path = dataset_path
         self.all_results = []
@@ -339,8 +389,8 @@ class BatchExecutor:
         from src.data import DataPersistence
         
         # Carregar configuração
-        config = ConfigurationManager.load_config_file(config_path)
-        instances = config['instances']
+        config_data = ConfigurationManager.load_config_file(config_path) # Renomeado para config_data
+        instances = config_data['instances']
         
         logger.info(f"\n📋 Executando {len(instances)} instâncias")
         
@@ -351,12 +401,13 @@ class BatchExecutor:
         executor = InstanceExecutor()
         self.all_results = []
         
-        for i, instance_config in enumerate(instances, 1): # Renomeado 'instance' para 'instance_config' para evitar conflito de nome
+        for i, instance_config in enumerate(instances, 1): 
             try:
                 results = executor.execute_instance(instance_config, i, train_df, val_df, test_df)
                 self.all_results.append((instance_config, results))
             except Exception as e:
-                logger.error(f"❌ Erro fatal na instância {i}: {e}")
+                logger.error(f"❌ Erro fatal na instância {i} ({instance_config.get('id', 'N/A')}): {e}")
+                logger.exception(f"Traceback do erro fatal na instância {i}:")
                 error_result = {'error': str(e), 'instance_id': instance_config.get('id', f'instance_{i}')}
                 self.all_results.append((instance_config, error_result))
                 continue
@@ -369,7 +420,10 @@ class BatchExecutor:
     def _generate_summary_report(self, config_path: str):
         """Gera relatório resumido comparativo."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = f"summary_report_{timestamp}.txt"
+        # Garante que o diretório base do config_path seja usado, ou o diretório atual se não for um path completo
+        base_report_dir = os.path.dirname(config_path) if os.path.dirname(config_path) else "." 
+        report_filename = f"summary_report_{os.path.basename(config_path).replace('.json', '')}_{timestamp}.txt"
+        report_path = os.path.join(base_report_dir, report_filename)
         
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write("="*80 + "\n")
@@ -377,74 +431,68 @@ class BatchExecutor:
             f.write("="*80 + "\n")
             f.write(f"Data/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Arquivo de configuração: {config_path}\n")
-            f.write(f"Total de instâncias: {len(self.all_results)}\n\n")
+            f.write(f"Total de instâncias configuradas: {len(self.all_results)}\n\n")
             
-            # Estatísticas gerais
-            successful = sum(1 for _, result in self.all_results if 'error' not in result)
-            failed = len(self.all_results) - successful
+            successful_executions = [res for _, res in self.all_results if 'error' not in res]
+            failed_executions_count = len(self.all_results) - len(successful_executions)
             
-            f.write(f"Execuções bem-sucedidas: {successful}\n")
-            f.write(f"Execuções com erro: {failed}\n\n")
+            f.write(f"Execuções bem-sucedidas: {len(successful_executions)}\n")
+            f.write(f"Execuções com erro: {failed_executions_count}\n\n")
             
-            if successful > 0:
-                # Tabela comparativa
+            if successful_executions:
                 f.write("RESULTADOS COMPARATIVOS (APENAS SUCESSOS):\n")
                 f.write("-"*80 + "\n")
-                f.write(f"{'ID':<15} {'Nome':<25} {'F1-Macro':<10} {'Hamming':<10} {'Avg Prec':<10} {'Tempo(s)':<10}\n")
+                header = f"{'ID':<15} {'Nome':<25} {'F1-Macro':<10} {'Hamming':<10} {'Avg Prec':<10} {'Tempo(s)':<10}\n"
+                f.write(header)
                 f.write("-"*80 + "\n")
                 
-                for instance_info, results in self.all_results:
-                    if 'error' in results:
-                        continue
+                sorted_results = sorted(successful_executions, 
+                                        key=lambda r: r.get('test_metrics', {}).get('test_avg_precision', -1.0), 
+                                        reverse=True)
+
+                for results_dict in sorted_results:
+                    instance_id_res = results_dict.get('instance_id', 'N/A')
+                    # Encontrar a config original para pegar o nome
+                    original_config = next((cfg for cfg, res in self.all_results if res.get('instance_id') == instance_id_res), None)
+                    instance_name = original_config[0].get('name', 'N/A')[:25] if original_config else 'N/A'
                     
-                    instance_id = instance_info.get('id', 'N/A')
-                    instance_name = instance_info.get('name', 'N/A')[:25]
+                    test_metrics = results_dict.get('test_metrics', {})
+                    f1_score = test_metrics.get('test_macro_f1', 0.0)
+                    hamming = test_metrics.get('test_hamming_loss', 1.0)
+                    avg_prec = test_metrics.get('test_avg_precision', 0.0)
+                    time_taken = results_dict.get('training_time', 0.0)
                     
-                    test_metrics = results.get('test_metrics', {})
-                    f1_score = test_metrics.get('test_macro_f1', 0)
-                    hamming = test_metrics.get('test_hamming_loss', 1)
-                    avg_prec = test_metrics.get('test_avg_precision', 0)
-                    time_taken = results.get('training_time', 0)
-                    
-                    f.write(f"{instance_id:<15} {instance_name:<25} "
+                    f.write(f"{instance_id_res:<15} {instance_name:<25} "
                            f"{f1_score:<10.4f} {hamming:<10.4f} {avg_prec:<10.4f} {time_taken:<10.1f}\n")
                 
-                # Identificar melhor modelo
                 f.write("\n" + "="*80 + "\n")
-                f.write("MELHOR MODELO POR MÉTRICA:\n")
+                f.write("MELHOR MODELO POR MÉTRICA (Avg Precision):\n")
                 f.write("="*80 + "\n")
                 
-                # Filtrar apenas instâncias bem-sucedidas para encontrar o máximo
-                successful_results = [res for res in self.all_results if 'error' not in res[1]]
-                if successful_results:
-                    best_f1 = max(successful_results, 
-                                 key=lambda x: x[1].get('test_metrics', {}).get('test_macro_f1', -1)) # Usar -1 para casos onde a métrica pode não existir
-                    best_ap = max(successful_results,
-                                 key=lambda x: x[1].get('test_metrics', {}).get('test_avg_precision', -1))
-                
-                    f.write(f"Melhor F1-Macro: {best_f1[0].get('id', 'N/A')} "
-                           f"({best_f1[1].get('test_metrics', {}).get('test_macro_f1', 0):.4f})\n")
-                    f.write(f"Melhor Avg Precision: {best_ap[0].get('id', 'N/A')} "
-                           f"({best_ap[1].get('test_metrics', {}).get('test_avg_precision', 0):.4f})\n")
-                else:
+                if sorted_results:
+                    best_ap_result = sorted_results[0] # Já está ordenado por avg_precision
+                    best_ap_id = best_ap_result.get('instance_id', 'N/A')
+                    best_ap_val = best_ap_result.get('test_metrics', {}).get('test_avg_precision', 0.0)
+                    f.write(f"Melhor Avg Precision: {best_ap_id} ({best_ap_val:.4f})\n")
+                else: # Embora já verificado por successful_executions, é uma dupla checagem
                     f.write("Nenhuma execução bem-sucedida para determinar o melhor modelo.\n")
-
-            # Erros se houver
-            if failed > 0:
+            
+            if failed_executions_count > 0:
                 f.write("\n" + "="*80 + "\n")
                 f.write("INSTÂNCIAS COM ERRO:\n")
                 f.write("="*80 + "\n")
                 
                 for instance_info, results in self.all_results:
                     if 'error' in results:
-                        instance_id = instance_info.get('id', 'N/A')
+                        instance_id_err = results.get('instance_id', instance_info.get('id', 'N/A'))
                         error_msg = results['error']
-                        f.write(f"{instance_id}: {error_msg}\n")
+                        f.write(f"{instance_id_err}: {error_msg}\n")
         
         logger.info(f"\n📄 Relatório resumido salvo em: {report_path}")
 
+
 def create_simple_config_example() -> str:
-    """Cria exemplo de configuração simples."""
+    # ... (código de create_simple_config_example permanece o mesmo) ...
     config = {
         "instances": [
             {
