@@ -11,7 +11,8 @@ from dataclasses import asdict
 import logging
 from datetime import datetime
 
-from src.config import ModelConfig, LossConfig, DATASET_PATH
+from src.config import ModelConfig, LossConfig, DATASET_PATH, NUM_LABELS # IMPORTAR NUM_LABELS
+# Adicionada vírgula e NUM_LABELS acima
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,10 @@ class InstanceExecutor:
         
         # Criar modelo e tokenizer
         model, tokenizer = ModelFactory.create_model_and_tokenizer(model_config)
-        ModelValidator.validate_model_config(model, len(train_df.columns) - 1)
+        
+        # CORREÇÃO APLICADA AQUI:
+        # Usar NUM_LABELS importado de src.config para a validação.
+        ModelValidator.validate_model_config(model, NUM_LABELS) 
         
         # Calcular alpha weights se necessário
         if loss_config.use_focal_loss:
@@ -347,14 +351,14 @@ class BatchExecutor:
         executor = InstanceExecutor()
         self.all_results = []
         
-        for i, instance in enumerate(instances, 1):
+        for i, instance_config in enumerate(instances, 1): # Renomeado 'instance' para 'instance_config' para evitar conflito de nome
             try:
-                results = executor.execute_instance(instance, i, train_df, val_df, test_df)
-                self.all_results.append((instance, results))
+                results = executor.execute_instance(instance_config, i, train_df, val_df, test_df)
+                self.all_results.append((instance_config, results))
             except Exception as e:
                 logger.error(f"❌ Erro fatal na instância {i}: {e}")
-                error_result = {'error': str(e), 'instance_id': instance.get('id', f'instance_{i}')}
-                self.all_results.append((instance, error_result))
+                error_result = {'error': str(e), 'instance_id': instance_config.get('id', f'instance_{i}')}
+                self.all_results.append((instance_config, error_result))
                 continue
         
         # Gerar relatório resumido
@@ -410,18 +414,21 @@ class BatchExecutor:
                 f.write("MELHOR MODELO POR MÉTRICA:\n")
                 f.write("="*80 + "\n")
                 
-                best_f1 = max(self.all_results, 
-                             key=lambda x: x[1].get('test_metrics', {}).get('test_macro_f1', 0) 
-                             if 'error' not in x[1] else 0)
-                best_ap = max(self.all_results,
-                             key=lambda x: x[1].get('test_metrics', {}).get('test_avg_precision', 0)
-                             if 'error' not in x[1] else 0)
+                # Filtrar apenas instâncias bem-sucedidas para encontrar o máximo
+                successful_results = [res for res in self.all_results if 'error' not in res[1]]
+                if successful_results:
+                    best_f1 = max(successful_results, 
+                                 key=lambda x: x[1].get('test_metrics', {}).get('test_macro_f1', -1)) # Usar -1 para casos onde a métrica pode não existir
+                    best_ap = max(successful_results,
+                                 key=lambda x: x[1].get('test_metrics', {}).get('test_avg_precision', -1))
                 
-                f.write(f"Melhor F1-Macro: {best_f1[0].get('id', 'N/A')} "
-                       f"({best_f1[1].get('test_metrics', {}).get('test_macro_f1', 0):.4f})\n")
-                f.write(f"Melhor Avg Precision: {best_ap[0].get('id', 'N/A')} "
-                       f"({best_ap[1].get('test_metrics', {}).get('test_avg_precision', 0):.4f})\n")
-            
+                    f.write(f"Melhor F1-Macro: {best_f1[0].get('id', 'N/A')} "
+                           f"({best_f1[1].get('test_metrics', {}).get('test_macro_f1', 0):.4f})\n")
+                    f.write(f"Melhor Avg Precision: {best_ap[0].get('id', 'N/A')} "
+                           f"({best_ap[1].get('test_metrics', {}).get('test_avg_precision', 0):.4f})\n")
+                else:
+                    f.write("Nenhuma execução bem-sucedida para determinar o melhor modelo.\n")
+
             # Erros se houver
             if failed > 0:
                 f.write("\n" + "="*80 + "\n")
