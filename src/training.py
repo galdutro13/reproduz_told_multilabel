@@ -5,7 +5,7 @@ Treinamento customizado e callbacks para modelos BERT multi-label.
 
 import torch
 import numpy as np
-import pandas as pd
+import pandas as pd # Embora não usado diretamente aqui após a refatoração do history, pode ser usado em outros lugares
 from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 from transformers import (
@@ -13,11 +13,12 @@ from transformers import (
     EvalPrediction, PreTrainedModel, PreTrainedTokenizer
 )
 import logging
+import math # Para math.ceil
 
-from src.config import ModelConfig, LossConfig
+from src.config import ModelConfig, LossConfig # Supondo que NUM_LABELS não é diretamente usado aqui, mas em config
 from src.losses import LossFactory
 from src.metrics import compute_metrics
-from src.data import MultiLabelDataset
+from src.data import MultiLabelDataset # Se MultiLabelDataset for usado apenas aqui para type hinting
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class ProgressCallback(TrainerCallback):
     def __init__(self):
         self.training_bar = None
         self.epoch_bar = None
-        self.current_epoch = 0
+        self.current_epoch_display = 0 # Para display do número da época
         
     def on_train_begin(self, args, state, control, **kwargs):
         """Inicializa barras de progresso."""
@@ -38,54 +39,90 @@ class ProgressCallback(TrainerCallback):
             leave=True,
             bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
         )
-        self.current_epoch = 0
+        self.current_epoch_display = 0
         
     def on_epoch_begin(self, args, state, control, **kwargs):
         """Início de uma nova época."""
-        if state.epoch is not None:
-            self.current_epoch = int(state.epoch)
-            self.epoch_bar.update(self.current_epoch - self.epoch_bar.n)
-            
-        # Criar barra para batches
-        total_steps = len(kwargs.get('train_dataloader', []))
+        # state.epoch é float e 0-indexed. Para display, queremos 1-indexed e inteiro.
+        self.current_epoch_display = int(math.floor(state.epoch)) + 1
+        if self.epoch_bar.n < self.current_epoch_display -1 : # Se pulou épocas no display (raro, mas possível)
+            self.epoch_bar.update(self.current_epoch_display -1 - self.epoch_bar.n)
+        
+        total_steps_in_epoch = 0
+        # train_dataloader pode não estar disponível em todas as chamadas ou setups de trainer
+        if "train_dataloader" in kwargs and hasattr(kwargs['train_dataloader'], '__len__'):
+            total_steps_in_epoch = len(kwargs['train_dataloader'])
+        else: # Fallback se train_dataloader não estiver disponível ou não tiver len()
+            if state.max_steps > 0 and args.num_train_epochs > 0: # Se max_steps foi calculado
+                 total_steps_in_epoch = math.ceil(state.max_steps / args.num_train_epochs)
+
+
         self.training_bar = tqdm(
-            total=total_steps,
-            desc=f"Época {self.current_epoch + 1}/{args.num_train_epochs}",
+            total=total_steps_in_epoch if total_steps_in_epoch > 0 else None, # None para barra indeterminada se não souber o total
+            desc=f"Época {self.current_epoch_display}/{int(args.num_train_epochs)}",
             position=1,
             leave=False,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
         )
         
     def on_step_end(self, args, state, control, **kwargs):
         """Atualiza barra de progresso após cada step."""
         if self.training_bar is not None:
-            # Atualizar com métricas
-            current_loss = state.log_history[-1].get('loss', 0) if state.log_history else 0
-            lr = state.log_history[-1].get('learning_rate', 0) if state.log_history else 0
+            current_log = state.log_history[-1] if state.log_history else {}
+            loss = current_log.get('loss')
+            lr = current_log.get('learning_rate')
             
-            self.training_bar.set_postfix({
-                'loss': f'{current_loss:.4f}',
-                'lr': f'{lr:.2e}'
-            })
+            postfix_str = []
+            if loss is not None:
+                postfix_str.append(f'loss={loss:.4f}')
+            if lr is not None:
+                postfix_str.append(f'lr={lr:.2e}')
+            
+            self.training_bar.set_postfix_str(", ".join(postfix_str))
             self.training_bar.update(1)
             
     def on_epoch_end(self, args, state, control, **kwargs):
         """Finaliza época."""
         if self.training_bar is not None:
             self.training_bar.close()
-            
+            self.training_bar = None # Resetar para a próxima época
+        
+        # Atualizar a barra de épocas principal
+        if self.epoch_bar.n < self.current_epoch_display:
+             self.epoch_bar.update(1)
+
         # Mostrar métricas de validação se disponíveis
-        if state.log_history and 'eval_loss' in state.log_history[-1]:
-            eval_metrics = state.log_history[-1]
-            logger.info(f"\n📊 Métricas Época {self.current_epoch + 1}: "
-                       f"eval_loss={eval_metrics.get('eval_loss', 0):.4f}, "
-                       f"macro_f1={eval_metrics.get('eval_macro_f1', 0):.4f}, "
-                       f"avg_precision={eval_metrics.get('eval_avg_precision', 0):.4f}")
+        # Encontrar o log de avaliação mais recente para esta época (que acabou de terminar)
+        # state.epoch será o float correspondente à época concluída (e.g., 1.0 após a primeira época)
+        completed_epoch_float = math.floor(state.epoch) # A época que acabou (0-indexed)
+        
+        eval_metrics_for_epoch = {}
+        for log in reversed(state.log_history):
+            # O log de avaliação é registrado com a época correspondente.
+            # Ex: após a época 0 (primeira época), log.get('epoch') pode ser ~1.0.
+            # Usamos math.isclose para comparar floats.
+            if 'eval_loss' in log and log.get('epoch') is not None and \
+               math.isclose(log.get('epoch'), completed_epoch_float + 1.0): # O log de epoch é 1-indexed no final da época
+                eval_metrics_for_epoch = log
+                break
+        
+        if eval_metrics_for_epoch:
+            logger.info(f"\n📊 Métricas Época {self.current_epoch_display}: "
+                       f"eval_loss={eval_metrics_for_epoch.get('eval_loss', float('nan')):.4f}, "
+                       f"macro_f1={eval_metrics_for_epoch.get('eval_macro_f1', float('nan')):.4f}, "
+                       f"avg_precision={eval_metrics_for_epoch.get('eval_avg_precision', float('nan')):.4f}")
             
     def on_train_end(self, args, state, control, **kwargs):
         """Finaliza treinamento."""
+        if self.training_bar is not None: # Fechar a barra de steps da última época, se ainda aberta
+            self.training_bar.close()
+            self.training_bar = None
         if self.epoch_bar is not None:
+            # Garantir que a barra de épocas chegue ao final se o treinamento terminar antes (ex: early stopping)
+            if self.epoch_bar.n < self.epoch_bar.total:
+                 self.epoch_bar.update(self.epoch_bar.total - self.epoch_bar.n)
             self.epoch_bar.close()
+            self.epoch_bar = None
         logger.info("\n✅ Treinamento concluído!")
 
 class EarlyStoppingCallback(TrainerCallback):
@@ -93,131 +130,123 @@ class EarlyStoppingCallback(TrainerCallback):
     
     def __init__(self, patience: int = 5, min_delta: float = 0.001, 
                  metric: str = "eval_avg_precision", mode: str = "max"):
-        """
-        Inicializa early stopping.
-        
-        Args:
-            patience: Número de épocas sem melhoria antes de parar
-            min_delta: Melhoria mínima considerada significativa
-            metric: Métrica para monitorar
-            mode: 'max' para maximizar, 'min' para minimizar
-        """
         self.patience = patience
         self.min_delta = min_delta
-        self.metric = metric
+        self.metric_to_monitor = metric 
         self.mode = mode
-        self.best_metric = None
+        self.best_metric_value = None 
         self.patience_counter = 0
-        
-    def on_evaluate(self, args, state, control, **kwargs):
-        """Verifica se deve aplicar early stopping."""
-        if not kwargs.get('logs'):
+        self.stopped_epoch = 0 # Para logar a época em que parou
+
+    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, logs: Optional[Dict[str, float]] = None, **kwargs):
+        if not logs:
             return
         
-        current_metric = kwargs['logs'].get(self.metric)
-        if current_metric is None:
+        current_metric_value = logs.get(self.metric_to_monitor)
+        if current_metric_value is None:
+            # O Trainer pode não incluir a métrica se ela for NaN ou não calculada
+            logger.warning(f"⚠️ Métrica de early stopping '{self.metric_to_monitor}' não encontrada nos logs de avaliação atuais (step {state.global_step}). Verifique se está sendo calculada e logada.")
             return
         
-        if self.best_metric is None:
-            self.best_metric = current_metric
+        logger.debug(f"EarlyStopping: current_metric ({self.metric_to_monitor}) = {current_metric_value:.4f} at step {state.global_step}")
+
+        if self.best_metric_value is None:
+            self.best_metric_value = current_metric_value
             self.patience_counter = 0
+            logger.info(f"🎯 EarlyStopping: Métrica inicial '{self.metric_to_monitor}' = {self.best_metric_value:.4f} (step {state.global_step}).")
             return
         
-        # Verificar melhoria
+        improved = False
+        delta = abs(current_metric_value - self.best_metric_value)
+
         if self.mode == "max":
-            improved = current_metric > (self.best_metric + self.min_delta)
-        else:
-            improved = current_metric < (self.best_metric - self.min_delta)
-        
+            if current_metric_value > self.best_metric_value:
+                if delta >= self.min_delta:
+                    improved = True
+                else: # Melhorou, mas não o suficiente (abaixo de min_delta)
+                    logger.info(f"🔎 EarlyStopping: Melhoria em '{self.metric_to_monitor}' ({current_metric_value:.4f} vs {self.best_metric_value:.4f}) não excede min_delta ({self.min_delta}). Contando como paciência.")
+            
+        else: # mode == "min"
+            if current_metric_value < self.best_metric_value:
+                if delta >= self.min_delta:
+                    improved = True
+                else: # Melhorou, mas não o suficiente
+                    logger.info(f"🔎 EarlyStopping: Melhoria em '{self.metric_to_monitor}' ({current_metric_value:.4f} vs {self.best_metric_value:.4f}) não excede min_delta ({self.min_delta}). Contando como paciência.")
+
         if improved:
-            self.best_metric = current_metric
+            logger.info(f"🎯 EarlyStopping: Nova melhor métrica '{self.metric_to_monitor}': {current_metric_value:.4f} (anterior: {self.best_metric_value:.4f}, step {state.global_step}). Paciência resetada.")
+            self.best_metric_value = current_metric_value
             self.patience_counter = 0
-            logger.info(f"🎯 Nova melhor métrica {self.metric}: {current_metric:.4f}")
         else:
             self.patience_counter += 1
-            logger.info(f"⏳ Sem melhoria há {self.patience_counter}/{self.patience} épocas")
+            logger.info(f"⏳ EarlyStopping: Sem melhoria significativa em '{self.metric_to_monitor}' há {self.patience_counter}/{self.patience} avaliações. "
+                        f"Atual: {current_metric_value:.4f}, Melhor: {self.best_metric_value:.4f} (step {state.global_step}).")
             
             if self.patience_counter >= self.patience:
-                logger.info(f"🛑 Early stopping ativado! Melhor {self.metric}: {self.best_metric:.4f}")
+                self.stopped_epoch = state.epoch
+                logger.info(f"🛑 Early stopping ativado na época {self.stopped_epoch:.2f} (step {state.global_step})! "
+                            f"Melhor '{self.metric_to_monitor}': {self.best_metric_value:.4f}.")
                 control.should_training_stop = True
 
 class MultiLabelTrainer(Trainer):
     """Trainer customizado para multi-label com suporte a diferentes loss functions."""
     
     def __init__(self, loss_config: Optional[LossConfig] = None, *args, **kwargs):
-        """
-        Inicializa trainer customizado.
-        
-        Args:
-            loss_config: Configuração da loss function
-        """
         super().__init__(*args, **kwargs)
-        self.loss_config = loss_config or LossConfig()
-        self.loss_config.validate()
+        self.loss_config = loss_config if loss_config is not None else LossConfig()
+        self.loss_config.validate() 
         self._setup_loss_function()
         
     def _setup_loss_function(self):
-        """Configura a loss function baseada em loss_config."""
-        loss_config_dict = {
+        focal_alpha_weights_list = None
+        if self.loss_config.focal_alpha_weights is not None:
+            focal_alpha_weights_list = torch.tensor(self.loss_config.focal_alpha_weights, device=self.args.device) \
+                if isinstance(self.loss_config.focal_alpha_weights, list) \
+                else self.loss_config.focal_alpha_weights 
+        
+        pos_weight_tensor = None
+        if self.loss_config.pos_weight is not None:
+            pos_weight_tensor = torch.tensor(self.loss_config.pos_weight, device=self.args.device) \
+                if isinstance(self.loss_config.pos_weight, list) \
+                else self.loss_config.pos_weight
+
+        loss_params = { 
             'use_focal_loss': self.loss_config.use_focal_loss,
             'focal_gamma': self.loss_config.focal_gamma,
-            'focal_alpha_weights': self.loss_config.focal_alpha_weights,
-            'pos_weight': self.loss_config.pos_weight
+            'focal_alpha_weights': focal_alpha_weights_list, # Deve ser tensor ou None
+            'pos_weight': pos_weight_tensor # Deve ser tensor ou None
         }
-        
-        self.loss_fct = LossFactory.create_loss_function(loss_config_dict)
+        self.loss_fct = LossFactory.create_loss_function(loss_params)
     
     def compute_loss(self, model, inputs, return_outputs=False):
-        """Calcula a loss usando a função configurada."""
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.get('logits')
-        
-        # Aplicar loss function customizada
-        loss = self.loss_fct(logits, labels)
-        
+        loss = self.loss_fct(logits, labels.float()) # labels para float()
         return (loss, outputs) if return_outputs else loss
 
 class TrainingManager:
     """Gerenciador de treinamento com funcionalidades avançadas."""
     
-    def __init__(self, config: ModelConfig, loss_config: LossConfig = None):
-        """
-        Inicializa gerenciador de treinamento.
-        
-        Args:
-            config: Configuração do modelo
-            loss_config: Configuração da loss function
-        """
+    def __init__(self, config: ModelConfig, loss_config: Optional[LossConfig] = None):
         self.config = config
-        self.loss_config = loss_config or LossConfig()
-        self.trainer = None
-        self.training_history = {}
+        self.loss_config = loss_config if loss_config is not None else LossConfig()
+        self.trainer: Optional[MultiLabelTrainer] = None
+        self.training_history: Dict[str, List[Any]] = {}
         
     def setup_trainer(self, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
-                     train_dataset: MultiLabelDataset, eval_dataset: MultiLabelDataset = None) -> MultiLabelTrainer:
-        """
-        Configura o trainer.
-        
-        Args:
-            model: Modelo para treinar
-            tokenizer: Tokenizer
-            train_dataset: Dataset de treino
-            eval_dataset: Dataset de validação (opcional)
-            
-        Returns:
-            MultiLabelTrainer: Trainer configurado
-        """
+                     train_dataset: MultiLabelDataset, eval_dataset: Optional[MultiLabelDataset] = None) -> MultiLabelTrainer:
         training_args = self.config.to_training_args()
+        callbacks: List[TrainerCallback] = [ProgressCallback()]
         
-        # Configurar callbacks
-        callbacks = [ProgressCallback()]
-        
-        # Early stopping se validação estiver habilitada
         if eval_dataset is not None and self.config.evaluate_during_training:
+            metric_name_for_early_stopping = self.config.metric_for_best_model
+            if not metric_name_for_early_stopping.startswith("eval_"):
+                 metric_name_for_early_stopping = f"eval_{self.config.metric_for_best_model}"
             early_stopping = EarlyStoppingCallback(
-                patience=3,
-                metric=f"eval_{self.config.metric_for_best_model}",
+                patience=self.config.early_stopping_patience if hasattr(self.config, 'early_stopping_patience') else 3, 
+                min_delta=self.config.early_stopping_threshold if hasattr(self.config, 'early_stopping_threshold') else 0.001,
+                metric=metric_name_for_early_stopping,
                 mode="max" if self.config.greater_is_better else "min"
             )
             callbacks.append(early_stopping)
@@ -229,204 +258,192 @@ class TrainingManager:
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             compute_metrics=compute_metrics,
-            tokenizer=tokenizer,
+            tokenizer=tokenizer, 
             callbacks=callbacks
         )
-        
         return self.trainer
     
-    def train(self) -> Tuple[Any, Dict[str, List[float]]]:
-        """
-        Executa o treinamento.
-        
-        Returns:
-            Tuple: Resultado do treinamento e histórico
-        """
+    def train(self) -> Tuple[Any, Dict[str, List[Any]]]:
         if self.trainer is None:
             raise ValueError("Trainer não foi configurado. Chame setup_trainer() primeiro.")
-        
         logger.info("\n🚀 Iniciando treinamento...")
         self._log_training_info()
-        
-        # Treinar
         train_result = self.trainer.train()
-        
-        # Salvar modelo
-        logger.info("\n💾 Salvando modelo...")
-        self.trainer.save_model()
+        logger.info("\n💾 Salvando modelo final e estado do trainer...")
+        self.trainer.save_model() 
         self.trainer.save_state()
-        
-        # Extrair histórico
         self.training_history = self._extract_training_history()
-        
-        # Log resumo
         self._log_training_summary(train_result)
-        
         return train_result, self.training_history
     
     def evaluate(self, test_dataset: MultiLabelDataset) -> Tuple[Dict[str, float], np.ndarray]:
-        """
-        Avalia o modelo no conjunto de teste.
-        
-        Args:
-            test_dataset: Dataset de teste
-            
-        Returns:
-            Tuple: Métricas e probabilidades
-        """
         if self.trainer is None:
             raise ValueError("Trainer não foi configurado.")
-        
         logger.info("\n🧪 Avaliando modelo no conjunto de teste...")
         logger.info(f"📊 Processando {len(test_dataset)} amostras...")
+        predictions_output = self.trainer.predict(test_dataset, metric_key_prefix="test")
         
-        # Fazer predições
-        predictions = self.trainer.predict(
-            test_dataset,
-            metric_key_prefix="test"
-        )
+        logits = predictions_output.predictions
+        if logits is None:
+            raise ValueError("Predições não retornaram logits.")
+        probs = torch.sigmoid(torch.tensor(logits, dtype=torch.float32)).numpy() # Especificar dtype
         
-        # Extrair logits e calcular probabilidades
-        logits = predictions.predictions
-        probs = torch.sigmoid(torch.tensor(logits)).numpy()
-        
-        # Calcular métricas
-        metrics = compute_metrics(EvalPrediction(predictions=logits, label_ids=predictions.label_ids))
-        
-        # Adicionar prefixo 'test_' às métricas
-        test_metrics = {f"test_{k}": v for k, v in metrics.items()}
-        
+        test_metrics = predictions_output.metrics if predictions_output.metrics is not None else {}
+        logger.info("📊 Métricas de Teste:")
+        for key, value in test_metrics.items():
+            logger.info(f"  {key}: {value:.4f}")
         return test_metrics, probs
     
     def _log_training_info(self):
-        """Log informações sobre o treinamento."""
-        if hasattr(self.trainer, 'train_dataset'):
+        if self.trainer and self.trainer.train_dataset:
             train_size = len(self.trainer.train_dataset)
             eval_size = len(self.trainer.eval_dataset) if self.trainer.eval_dataset else 0
-            
             logger.info(f"📊 Dados: {train_size} amostras de treino, {eval_size} amostras de validação")
         
         logger.info(f"⚙️  Configuração: {self.config.num_train_epochs} épocas, "
                    f"batch_size={self.config.per_device_train_batch_size}, "
                    f"lr={self.config.learning_rate}")
-        
-        # Calcular steps totais
-        if hasattr(self.trainer, 'train_dataset'):
-            total_steps = (len(self.trainer.train_dataset) // 
-                          self.config.per_device_train_batch_size * 
-                          self.config.num_train_epochs)
-            logger.info(f"📈 Total de steps: {total_steps}")
-            logger.info(f"📊 Avaliação a cada {self.config.eval_steps} steps")
-            logger.info(f"💾 Salvamento a cada {self.config.save_steps} steps")
-        
+        if self.trainer: # Trainer deve estar inicializado para ter state.max_steps
+            logger.info(f"📈 Total de steps de treinamento: {self.trainer.state.max_steps}")
+        logger.info(f"📊 Avaliação a cada {self.config.eval_steps} steps")
+        logger.info(f"💾 Salvamento a cada {self.config.save_steps} steps (limite: {self.config.save_total_limit})")
+        logger.info(f"🎯 Melhor modelo será salvo baseado em: {self.config.metric_for_best_model} ({'maior' if self.config.greater_is_better else 'menor'} é melhor)")
         logger.info("\n" + "="*80 + "\n")
     
-    def _extract_training_history(self) -> Dict[str, List[float]]:
-        """Extrai histórico de treinamento dos logs."""
-        history = {
-            'global_step': [],
-            'train_loss': [],
-            'eval_loss': [],
-            'macro_f1': [],
-            'hamming_loss': [],
-            'avg_precision': []
+    def _extract_training_history(self) -> Dict[str, List[Any]]:
+        """Extrai histórico de treinamento dos logs de forma mais robusta."""
+        history: Dict[str, List[Any]] = {
+            'train_steps': [], 'train_loss': [], 'train_learning_rate': [],
+            'eval_steps': [], 'eval_loss': [],
+            'eval_macro_f1': [], 'eval_micro_f1': [], 'eval_weighted_f1': [],
+            'eval_hamming_loss': [], 'eval_avg_precision': [],
+            'eval_macro_precision': [], 'eval_macro_recall': [],
+            # Chaves legadas/compatibilidade
+            'global_step': [], 'loss': [], 'learning_rate': [], # Para treino
+            'macro_f1': [], 'hamming_loss': [], 'avg_precision': [] # Para eval
         }
+
+        if self.trainer is None or not hasattr(self.trainer, 'state') or not self.trainer.state.log_history:
+            logger.warning("Trainer ou log_history não inicializado, histórico de treinamento estará vazio.")
+            return history
+
+        for log_entry in self.trainer.state.log_history:
+            step = log_entry.get('step')
+            epoch = log_entry.get('epoch') # Pode ser float
+
+            # Logs de treinamento (contêm 'loss', podem conter 'learning_rate', mas não 'eval_loss')
+            is_train_log = 'loss' in log_entry and 'eval_loss' not in log_entry
+            if is_train_log and step is not None:
+                history['train_steps'].append(step)
+                history['train_loss'].append(log_entry['loss'])
+                if 'learning_rate' in log_entry:
+                    history['train_learning_rate'].append(log_entry['learning_rate'])
+                else: # Adicionar NaN se não houver learning_rate neste log de treino
+                    if history['train_learning_rate'] and len(history['train_learning_rate']) < len(history['train_steps']):
+                        history['train_learning_rate'].append(float('nan'))
+
+
+            # Logs de avaliação (contêm 'eval_loss' e outras métricas 'eval_*')
+            is_eval_log = 'eval_loss' in log_entry
+            if is_eval_log and step is not None: # Os logs de avaliação também têm 'step'
+                history['eval_steps'].append(step)
+                history['eval_loss'].append(log_entry['eval_loss'])
+                history['eval_macro_f1'].append(log_entry.get('eval_macro_f1', float('nan')))
+                history['eval_micro_f1'].append(log_entry.get('eval_micro_f1', float('nan')))
+                history['eval_weighted_f1'].append(log_entry.get('eval_weighted_f1', float('nan')))
+                history['eval_hamming_loss'].append(log_entry.get('eval_hamming_loss', float('nan')))
+                history['eval_avg_precision'].append(log_entry.get('eval_avg_precision', float('nan')))
+                history['eval_macro_precision'].append(log_entry.get('eval_macro_precision', float('nan')))
+                history['eval_macro_recall'].append(log_entry.get('eval_macro_recall', float('nan')))
         
-        for log in self.trainer.state.log_history:
-            if 'loss' in log:
-                history['global_step'].append(log.get('step', 0))
-                history['train_loss'].append(log['loss'])
-            if 'eval_loss' in log:
-                # Garantir que temos o mesmo número de steps
-                if len(history['eval_loss']) < len(history['global_step']):
-                    history['eval_loss'].append(log['eval_loss'])
-                    history['macro_f1'].append(log.get('eval_macro_f1', 0))
-                    history['hamming_loss'].append(log.get('eval_hamming_loss', 0))
-                    history['avg_precision'].append(log.get('eval_avg_precision', 0))
+        # Garantir que todas as listas de 'train' tenham o mesmo tamanho de 'train_steps'
+        target_train_len = len(history['train_steps'])
+        if len(history['train_learning_rate']) < target_train_len:
+            history['train_learning_rate'].extend([float('nan')] * (target_train_len - len(history['train_learning_rate'])))
+
+        # Preencher chaves legadas para compatibilidade
+        history['global_step'] = list(history['train_steps'])
+        history['loss'] = list(history['train_loss']) # 'loss' é ambiguo, mas mantendo por compatibilidade com 'train_loss'
+        history['learning_rate'] = list(history['train_learning_rate'])
         
+        history['macro_f1'] = list(history['eval_macro_f1'])
+        history['hamming_loss'] = list(history['eval_hamming_loss'])
+        history['avg_precision'] = list(history['eval_avg_precision'])
+            
         return history
-    
+
     def _log_training_summary(self, train_result):
-        """Log resumo do treinamento."""
         logger.info("\n" + "="*80)
         logger.info("📊 RESUMO DO TREINAMENTO")
         logger.info("="*80)
-        logger.info(f"✅ Treinamento concluído em {train_result.metrics['train_runtime']:.2f} segundos")
-        logger.info(f"📈 Loss final de treino: {train_result.metrics['train_loss']:.4f}")
         
-        if self.training_history['eval_loss']:
-            logger.info(f"📊 Melhor loss de validação: {min(self.training_history['eval_loss']):.4f}")
-            logger.info(f"🎯 Melhor F1-Macro: {max(self.training_history['macro_f1']):.4f}")
-            logger.info(f"🎯 Melhor Avg Precision: {max(self.training_history['avg_precision']):.4f}")
+        train_metrics = train_result.metrics
+        if train_metrics:
+            logger.info(f"✅ Treinamento concluído em {train_metrics.get('train_runtime', 0):.2f} segundos ({train_metrics.get('train_samples_per_second', 0):.2f} amostras/seg)")
+            logger.info(f"📈 Loss final de treino (época): {train_metrics.get('train_loss', float('nan')):.4f}") # Métrica de fim de época
+            # Para loss média de treino de todos os steps, pode-se calcular a partir de history['train_loss']
+            if self.training_history.get('train_loss'):
+                avg_train_loss_all_steps = np.nanmean([x for x in self.training_history['train_loss'] if isinstance(x, (int, float))])
+                logger.info(f"📈 Loss média de treino (todos os steps): {avg_train_loss_all_steps:.4f}")
+        else:
+            logger.warning("Metrics do resultado do treino não encontradas.")
+
+        # Usar as chaves 'eval_*' do history para o resumo das métricas de validação
+        if self.training_history.get('eval_loss') and any(not np.isnan(x) for x in self.training_history['eval_loss']):
+            valid_eval_loss = [x for x in self.training_history['eval_loss'] if not np.isnan(x)]
+            valid_eval_macro_f1 = [x for x in self.training_history['eval_macro_f1'] if not np.isnan(x)]
+            valid_eval_avg_precision = [x for x in self.training_history['eval_avg_precision'] if not np.isnan(x)]
+
+            if valid_eval_loss: logger.info(f"📊 Melhor loss de validação: {min(valid_eval_loss):.4f}")
+            if valid_eval_macro_f1: logger.info(f"🎯 Melhor F1-Macro de validação: {max(valid_eval_macro_f1):.4f}")
+            if valid_eval_avg_precision: logger.info(f"🎯 Melhor Avg Precision de validação: {max(valid_eval_avg_precision):.4f}")
+        else:
+            logger.info("ℹ️ Nenhuma métrica de validação registrada ou todas são NaN no histórico para resumo.")
+
 
 class ModelCheckpointer:
-    """Gerenciador de checkpoints do modelo."""
-    
+    # ... (ModelCheckpointer permanece o mesmo) ...
     @staticmethod
-    def save_checkpoint(trainer: Trainer, checkpoint_dir: str, metadata: Dict = None):
-        """
-        Salva checkpoint com metadados.
-        
-        Args:
-            trainer: Trainer com modelo
-            checkpoint_dir: Diretório para salvar
-            metadata: Metadados adicionais
-        """
+    def save_checkpoint(trainer: Trainer, checkpoint_dir: str, metadata: Optional[Dict] = None): # metadata pode ser None
         import os
         import json
         from datetime import datetime
         
         os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        # Salvar modelo
         trainer.save_model(checkpoint_dir)
         trainer.save_state()
         
-        # Salvar metadados
         if metadata:
-            metadata_path = os.path.join(checkpoint_dir, "metadata.json")
-            metadata['saved_at'] = datetime.now().isoformat()
-            
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-        
+            metadata_to_save = metadata.copy()
+            metadata_to_save['saved_at'] = datetime.now().isoformat()
+            metadata_path = os.path.join(checkpoint_dir, "training_metadata.json") 
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata_to_save, f, indent=2, ensure_ascii=False)
         logger.info(f"💾 Checkpoint salvo em: {checkpoint_dir}")
     
     @staticmethod
     def load_checkpoint(checkpoint_dir: str, model_class=None, tokenizer_class=None):
-        """
-        Carrega checkpoint.
-        
-        Args:
-            checkpoint_dir: Diretório do checkpoint
-            model_class: Classe do modelo (opcional)
-            tokenizer_class: Classe do tokenizer (opcional)
-            
-        Returns:
-            Tuple: Modelo, tokenizer, metadados
-        """
         import os
         import json
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         
-        if not os.path.exists(checkpoint_dir):
-            raise FileNotFoundError(f"Checkpoint não encontrado: {checkpoint_dir}")
+        if not os.path.isdir(checkpoint_dir):
+            raise FileNotFoundError(f"Diretório do checkpoint não encontrado: {checkpoint_dir}")
         
-        # Carregar modelo
-        model_class = model_class or AutoModelForSequenceClassification
-        model = model_class.from_pretrained(checkpoint_dir)
+        model_class_to_use = model_class if model_class is not None else AutoModelForSequenceClassification
+        model = model_class_to_use.from_pretrained(checkpoint_dir)
         
-        # Carregar tokenizer
-        tokenizer_class = tokenizer_class or AutoTokenizer
-        tokenizer = tokenizer_class.from_pretrained(checkpoint_dir)
+        tokenizer_class_to_use = tokenizer_class if tokenizer_class is not None else AutoTokenizer
+        tokenizer = tokenizer_class_to_use.from_pretrained(checkpoint_dir)
         
-        # Carregar metadados se existirem
-        metadata_path = os.path.join(checkpoint_dir, "metadata.json")
-        metadata = None
+        metadata_path = os.path.join(checkpoint_dir, "training_metadata.json")
+        loaded_metadata = None
         if os.path.exists(metadata_path):
-            with open(metadata_path, 'r') as f:
-                metadata = json.load(f)
-        
+            try:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    loaded_metadata = json.load(f)
+                logger.info(f"📄 Metadados de treinamento carregados de: {metadata_path}")
+            except Exception as e: # Captura mais genérica para erros de load/decode
+                logger.warning(f"⚠️ Erro ao carregar ou decodificar JSON de metadados em: {metadata_path} - {e}")
         logger.info(f"📂 Checkpoint carregado de: {checkpoint_dir}")
-        
-        return model, tokenizer, metadata
+        return model, tokenizer, loaded_metadata

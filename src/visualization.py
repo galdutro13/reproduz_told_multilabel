@@ -1,490 +1,452 @@
-# -*- coding: utf-8 -*-
-"""
-Visualizações e gráficos para análise de modelos multi-label.
-"""
+# src/visualization.py
 
-import os
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, List, Tuple, Optional
-from pathlib import Path
+import numpy as np
+import pandas as pd
+import os
 import logging
-
+from typing import Dict, List, Optional, Tuple, Any
+from sklearn.metrics import (
+    roc_curve, auc, precision_recall_curve, average_precision_score,
+    confusion_matrix, classification_report, multilabel_confusion_matrix
+)
 from src.config import LABELS
 
 logger = logging.getLogger(__name__)
+sns.set_theme(style="whitegrid")
 
-# Configurações de estilo
-plt.style.use('default')
-sns.set_palette("husl")
+class PlottingUtils:
+    COLORS = ["#FF6347", "#4682B4", "#32CD32", "#FFD700", "#6A5ACD", "#FF69B4", "#00CED1", "#FA8072", "#7B68EE", "#20B2AA"]
+    MARKERS = ['o', 's', '^', 'D', 'P', '*', 'X', 'v', '<', '>']
+
+    @staticmethod
+    def save_plot(fig, path: str, filename: str):
+        os.makedirs(path, exist_ok=True)
+        full_path = os.path.join(path, filename)
+        try:
+            fig.savefig(full_path, bbox_inches='tight', dpi=300)
+            logger.info(f"🖼️ Gráfico salvo em: {full_path}")
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar gráfico {filename}: {e}")
+        plt.close(fig)
 
 class TrainingVisualizer:
-    """Visualizador para curvas de treinamento."""
-    
     @staticmethod
-    def plot_training_curves(training_history: Dict[str, List[float]], 
-                           save_path: str = "training_curves.png"):
-        """
-        Plota curvas de treinamento (loss e métricas).
-        
-        Args:
-            training_history: Histórico de treinamento
-            save_path: Caminho para salvar o gráfico
-        """
-        df = pd.DataFrame(training_history)
-        
-        if 'eval_loss' not in df.columns or 'macro_f1' not in df.columns:
-            logger.warning("Histórico não possui dados de validação")
-            TrainingVisualizer._plot_training_loss_only(df, save_path)
+    def plot_training_curves(training_history: Dict[str, List[Any]], output_dir: str):
+        logger.info("📈 Plotando curvas de aprendizado...")
+
+        if training_history.get('train_steps') and training_history.get('train_loss'):
+            train_steps_clean = training_history['train_steps']
+            train_loss_clean = [x for x in training_history['train_loss'] if isinstance(x, (int, float)) and not np.isnan(x)]
+            
+            if len(train_loss_clean) < len(training_history['train_loss']):
+                valid_indices = [i for i, x in enumerate(training_history['train_loss']) if isinstance(x, (int, float)) and not np.isnan(x)]
+                train_steps_clean = [training_history['train_steps'][i] for i in valid_indices]
+
+            if train_steps_clean and train_loss_clean and len(train_steps_clean) == len(train_loss_clean):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(train_steps_clean, train_loss_clean, label='Training Loss', color=PlottingUtils.COLORS[0], marker=PlottingUtils.MARKERS[0 % len(PlottingUtils.MARKERS)], linestyle='-')
+                ax.set_title('Curva de Loss do Treinamento')
+                ax.set_xlabel('Steps de Treinamento')
+                ax.set_ylabel('Loss')
+                ax.legend()
+                ax.grid(True, linestyle='--', alpha=0.7)
+                PlottingUtils.save_plot(fig, output_dir, "training_loss_curve.png")
+            else:
+                logger.warning("⚠️ Não há dados válidos suficientes ou há incompatibilidade de tamanho para plotar a curva de loss de treino.")
+        else:
+            logger.warning("⚠️ Chaves 'train_steps' ou 'train_loss' não encontradas no histórico para plotagem de loss de treino.")
+
+        if training_history.get('train_steps') and training_history.get('train_learning_rate'):
+            lr_steps_clean = training_history['train_steps']
+            lr_values_clean = [x for x in training_history['train_learning_rate'] if isinstance(x, (int, float)) and not np.isnan(x)]
+
+            if len(lr_values_clean) < len(training_history['train_learning_rate']):
+                valid_indices = [i for i, x in enumerate(training_history['train_learning_rate']) if isinstance(x, (int, float)) and not np.isnan(x)]
+                if len(valid_indices) == len(lr_values_clean) and len(lr_steps_clean) >= len(lr_values_clean):
+                     lr_steps_clean = [training_history['train_steps'][i] for i in valid_indices]
+
+            if lr_steps_clean and lr_values_clean and len(lr_steps_clean) == len(lr_values_clean):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(lr_steps_clean, lr_values_clean, label='Learning Rate', color=PlottingUtils.COLORS[1 % len(PlottingUtils.COLORS)], marker=PlottingUtils.MARKERS[1 % len(PlottingUtils.MARKERS)], linestyle='-')
+                ax.set_title('Curva de Taxa de Aprendizado')
+                ax.set_xlabel('Steps de Treinamento')
+                ax.set_ylabel('Learning Rate')
+                ax.legend()
+                ax.grid(True, linestyle='--', alpha=0.7)
+                PlottingUtils.save_plot(fig, output_dir, "learning_rate_curve.png")
+            else:
+                logger.warning("⚠️ Não há dados válidos suficientes ou há incompatibilidade de tamanho para plotar a curva de learning rate.")
+        else:
+            logger.warning("⚠️ Chaves 'train_steps' ou 'train_learning_rate' não encontradas no histórico para plotagem de learning rate.")
+
+        eval_metrics_to_plot = {
+            'eval_loss': 'Validation Loss',
+            'eval_avg_precision': 'Validation Average Precision',
+            'eval_macro_f1': 'Validation Macro F1-Score',
+            'eval_hamming_loss': 'Validation Hamming Loss',
+            'eval_micro_f1': 'Validation Micro F1-Score',
+            'eval_weighted_f1': 'Validation Weighted F1-Score',
+            'eval_macro_precision': 'Validation Macro Precision',
+            'eval_macro_recall': 'Validation Macro Recall'
+        }
+
+        if training_history.get('eval_steps'):
+            eval_steps = training_history['eval_steps']
+            if not eval_steps:
+                logger.warning("⚠️ 'eval_steps' está vazio. Pulando plot de métricas de avaliação.")
+            else:
+                for metric_idx, (metric_key, plot_label) in enumerate(eval_metrics_to_plot.items()):
+                    if training_history.get(metric_key):
+                        metric_values = training_history[metric_key]
+                        valid_indices = [i for i, val in enumerate(metric_values) if isinstance(val, (int, float)) and not np.isnan(val)]
+                        
+                        if not valid_indices:
+                            logger.warning(f"⚠️ Não há dados válidos para a métrica '{metric_key}'. Pulando plot.")
+                            continue
+
+                        current_eval_steps = [eval_steps[i] for i in valid_indices if i < len(eval_steps)]
+                        current_metric_values = [metric_values[i] for i in valid_indices]
+
+                        if not current_eval_steps or len(current_eval_steps) != len(current_metric_values):
+                            logger.warning(f"⚠️ Incompatibilidade de tamanho ou ausência de steps válidos para '{metric_key}' após filtrar NaNs. Pulando plot.")
+                            continue
+
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        color_idx = (metric_idx + 2) % len(PlottingUtils.COLORS)
+                        marker_idx = (metric_idx + 2) % len(PlottingUtils.MARKERS)
+                        ax.plot(current_eval_steps, current_metric_values, label=plot_label, color=PlottingUtils.COLORS[color_idx], marker=PlottingUtils.MARKERS[marker_idx], linestyle='-')
+                        ax.set_title(f'Curva de {plot_label}')
+                        ax.set_xlabel('Steps de Avaliação')
+                        ax.set_ylabel(plot_label.split()[-1])
+                        ax.legend()
+                        ax.grid(True, linestyle='--', alpha=0.7)
+                        PlottingUtils.save_plot(fig, output_dir, f"{metric_key}_curve.png")
+                    else:
+                        logger.warning(f"⚠️ Chave '{metric_key}' não encontrada no histórico para plotagem.")
+        else:
+            logger.warning("⚠️ Chave 'eval_steps' não encontrada no histórico. Pulando plot de métricas de avaliação.")
+
+
+class EvaluationVisualizer:
+    @staticmethod
+    def plot_roc_curves(y_true: np.ndarray, y_probs: np.ndarray, output_dir: str, labels_list: Optional[List[str]] = None):
+        if y_true is None or y_probs is None:
+            logger.warning("⚠️ y_true ou y_probs é None. Pulando plot de curvas ROC.")
             return
-        
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        
-        # Plot 1: Losses
-        ax1.plot(df['global_step'], df['train_loss'], 'b-', label='Train Loss', linewidth=2)
-        ax1.plot(df['global_step'], df['eval_loss'], 'r-', label='Validation Loss', linewidth=2)
-        ax1.set_xlabel('Global Step')
-        ax1.set_ylabel('Loss')
-        ax1.set_title('Curvas de Loss')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Métricas
-        ax2.plot(df['global_step'], df['macro_f1'], 'g-', label='Macro F1', linewidth=2)
-        ax2.plot(df['global_step'], df['avg_precision'], 'm-', label='Avg Precision', linewidth=2)
-        ax2.set_xlabel('Global Step')
-        ax2.set_ylabel('Score')
-        ax2.set_title('Métricas de Validação')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Curvas de treinamento salvas em: {save_path}")
-    
+        if y_true.shape != y_probs.shape:
+            logger.error(f"❌ Incompatibilidade de shape entre y_true ({y_true.shape}) e y_probs ({y_probs.shape}) para ROC.")
+            return
+            
+        logger.info("📈 Plotando curvas ROC...")
+        num_classes = y_true.shape[1]
+        current_labels = labels_list if labels_list and len(labels_list) == num_classes else LABELS
+        if len(current_labels) != num_classes:
+            logger.warning(f"⚠️ Número de LABELS ({len(current_labels)}) não corresponde ao número de classes ({num_classes}). Usando labels genéricos para ROC.")
+            current_labels = [f"Classe {i+1}" for i in range(num_classes)]
+
+        fpr, tpr, roc_auc = {}, {}, {}
+        fig, ax = plt.subplots(figsize=(12, 9))
+        for i in range(num_classes):
+            fpr[i], tpr[i], _ = roc_curve(y_true[:, i], y_probs[:, i])
+            roc_auc[i] = auc(fpr[i], tpr[i])
+            ax.plot(fpr[i], tpr[i], color=PlottingUtils.COLORS[i % len(PlottingUtils.COLORS)], lw=2,
+                    label=f'ROC {current_labels[i]} (AUC = {roc_auc[i]:.3f})')
+
+        fpr["micro"], tpr["micro"], _ = roc_curve(y_true.ravel(), y_probs.ravel())
+        roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+        ax.plot(fpr["micro"], tpr["micro"], color='black', linestyle=':', linewidth=3,
+                label=f'Micro-average ROC (AUC = {roc_auc["micro"]:.3f})')
+
+        ax.plot([0, 1], [0, 1], 'k--', lw=1.5)
+        ax.set_xlim([-0.02, 1.0])
+        ax.set_ylim([0.0, 1.02])
+        ax.set_xlabel('Taxa de Falsos Positivos (FPR)', fontsize=12)
+        ax.set_ylabel('Taxa de Verdadeiros Positivos (TPR)', fontsize=12)
+        ax.set_title('Curvas ROC Multi-classe', fontsize=14)
+        ax.legend(loc="lower right", fontsize=10)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        PlottingUtils.save_plot(fig, output_dir, "roc_curves.png")
+
     @staticmethod
-    def _plot_training_loss_only(df: pd.DataFrame, save_path: str):
-        """Plota apenas loss de treinamento quando não há validação."""
+    def plot_precision_recall_curves(y_true: np.ndarray, y_probs: np.ndarray, output_dir: str, labels_list: Optional[List[str]] = None):
+        if y_true is None or y_probs is None:
+            logger.warning("⚠️ y_true ou y_probs é None. Pulando plot de curvas Precision-Recall.")
+            return
+        if y_true.shape != y_probs.shape:
+            logger.error(f"❌ Incompatibilidade de shape entre y_true ({y_true.shape}) e y_probs ({y_probs.shape}) para PR.")
+            return
+
+        logger.info("📈 Plotando curvas Precision-Recall...")
+        num_classes = y_true.shape[1]
+        current_labels = labels_list if labels_list and len(labels_list) == num_classes else LABELS
+        if len(current_labels) != num_classes:
+            logger.warning(f"⚠️ Número de LABELS ({len(current_labels)}) não corresponde ao número de classes ({num_classes}). Usando labels genéricos para PR.")
+            current_labels = [f"Classe {i+1}" for i in range(num_classes)]
+            
+        precision, recall, average_precision = {}, {}, {}
+        fig, ax = plt.subplots(figsize=(12, 9))
+        for i in range(num_classes):
+            precision[i], recall[i], _ = precision_recall_curve(y_true[:, i], y_probs[:, i])
+            average_precision[i] = average_precision_score(y_true[:, i], y_probs[:, i])
+            ax.plot(recall[i], precision[i], color=PlottingUtils.COLORS[i % len(PlottingUtils.COLORS)], lw=2,
+                    label=f'PR {current_labels[i]} (AP = {average_precision[i]:.3f})')
+
+        precision["micro"], recall["micro"], _ = precision_recall_curve(y_true.ravel(), y_probs.ravel())
+        average_precision["micro"] = average_precision_score(y_true.ravel(), y_probs.ravel(), average="micro")
+        ax.plot(recall["micro"], precision["micro"], color='black', linestyle=':', linewidth=3,
+                label=f'Micro-average PR (AP = {average_precision["micro"]:.3f})')
+        
+        ax.set_xlim([0.0, 1.02])
+        ax.set_ylim([0.0, 1.02])
+        ax.set_xlabel('Recall', fontsize=12)
+        ax.set_ylabel('Precision', fontsize=12)
+        ax.set_title('Curvas Precision-Recall Multi-classe', fontsize=14)
+        ax.legend(loc="lower left", fontsize=10)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        PlottingUtils.save_plot(fig, output_dir, "precision_recall_curves.png")
+
+    @staticmethod
+    def plot_confusion_matrices(y_true: np.ndarray, y_pred: np.ndarray, output_dir: str, labels_list: Optional[List[str]] = None):
+        if y_true is None or y_pred is None:
+            logger.warning("⚠️ y_true ou y_pred é None. Pulando plot de matrizes de confusão.")
+            return
+        if y_true.shape != y_pred.shape:
+            logger.error(f"❌ Incompatibilidade de shape entre y_true ({y_true.shape}) e y_pred ({y_pred.shape}) para matriz de confusão.")
+            return
+            
+        logger.info("📊 Plotando matrizes de confusão...")
+        num_classes = y_true.shape[1]
+        current_labels = labels_list if labels_list and len(labels_list) == num_classes else LABELS
+        if len(current_labels) != num_classes:
+            logger.warning(f"⚠️ Número de LABELS ({len(current_labels)}) não corresponde ao número de classes ({num_classes}). Usando labels genéricos para CM.")
+            current_labels = [f"Classe {i+1}" for i in range(num_classes)]
+
+        mcm = multilabel_confusion_matrix(y_true, y_pred)
+        n_cols = 3
+        n_rows = (num_classes + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4.5 * n_rows))
+        axes = axes.flatten() 
+
+        for i in range(num_classes):
+            if i >= len(axes): break
+            ax = axes[i]
+            class_name_short = current_labels[i].split()[0].capitalize()
+            sns.heatmap(mcm[i], annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False, annot_kws={"size": 10})
+            ax.set_title(f'{current_labels[i]}', fontsize=11)
+            ax.set_xlabel('Predito', fontsize=9)
+            ax.set_ylabel('Verdadeiro', fontsize=9)
+            ax.set_xticklabels([f'Não-{class_name_short}', class_name_short], fontsize=8)
+            ax.set_yticklabels([f'Não-{class_name_short}', class_name_short], fontsize=8, rotation=0)
+
+        if num_classes < len(axes):
+            for j in range(num_classes, len(axes)):
+                fig.delaxes(axes[j])
+
+        fig.suptitle('Matrizes de Confusão por Classe (Individuais)', fontsize=14, y=1.02)
+        fig.tight_layout(rect=[0, 0, 1, 0.98])
+        PlottingUtils.save_plot(fig, output_dir, "confusion_matrices_per_class.png")
+
+    @staticmethod
+    def plot_per_class_metrics_comparison(per_class_metrics: Dict[str, Dict[str, float]], output_dir: str, 
+                                         metric_names: Optional[List[str]] = None):
+        if not per_class_metrics:
+            logger.warning("⚠️ Dicionário 'per_class_metrics' está vazio. Pulando plot de comparação de métricas.")
+            return
+
+        logger.info("📊 Plotando comparação de métricas por classe...")
+        class_names = list(per_class_metrics.keys())
+        if not class_names:
+            logger.warning("⚠️ Não foi possível extrair nomes das classes de 'per_class_metrics'. Pulando plot.")
+            return
+
+        default_metrics = ['f1-score', 'precision', 'recall']
+        metrics_to_plot = metric_names if metric_names else default_metrics
+        
+        available_metrics_in_data = set()
+        if isinstance(per_class_metrics.get(class_names[0]), dict):
+            available_metrics_in_data.update(per_class_metrics[class_names[0]].keys())
+        
+        actual_metrics_to_plot = [m for m in metrics_to_plot if m in available_metrics_in_data]
+        if not actual_metrics_to_plot:
+            logger.warning(f"⚠️ Nenhuma das métricas especificadas/padrão ({metrics_to_plot}) encontrada nos dados. Pulando.")
+            return
+
+        plot_data = {metric: [] for metric in actual_metrics_to_plot}
+        valid_class_names_for_plot = []
+
+        for class_name in class_names:
+            class_metric_dict = per_class_metrics.get(class_name)
+            if isinstance(class_metric_dict, dict):
+                current_class_metric_values = []
+                all_metrics_found_for_class = True
+                for metric in actual_metrics_to_plot:
+                    value = class_metric_dict.get(metric)
+                    if value is None or np.isnan(value):
+                        logger.warning(f"Métrica '{metric}' ausente ou NaN para a classe '{class_name}'. Esta classe não será plotada.")
+                        all_metrics_found_for_class = False
+                        break
+                    current_class_metric_values.append(value)
+                
+                if all_metrics_found_for_class:
+                    valid_class_names_for_plot.append(class_name)
+                    for i, metric in enumerate(actual_metrics_to_plot):
+                        plot_data[metric].append(current_class_metric_values[i])
+            else:
+                logger.warning(f"Dados de métrica para a classe '{class_name}' não são um dicionário. Pulando esta classe.")
+        
+        if not valid_class_names_for_plot:
+            logger.warning("⚠️ Nenhuma classe com dados de métrica válidos para todas as métricas selecionadas. Pulando plot de comparação.")
+            return
+
+        df_metrics = pd.DataFrame(plot_data, index=valid_class_names_for_plot)
+        fig, ax = plt.subplots(figsize=(max(10, len(valid_class_names_for_plot) * 0.7), 6))
+        df_metrics.plot(kind='bar', ax=ax, width=0.8)
+        
+        ax.set_title('Comparação de Métricas por Classe', fontsize=15)
+        ax.set_ylabel('Score', fontsize=12)
+        ax.set_xlabel('Classes', fontsize=12)
+        ax.legend(title='Métricas', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=9)
+        
+        # --- CORREÇÃO APLICADA AQUI ---
+        # Remover 'ha' de tick_params e aplicar rotação e alinhamento aos xticklabels diretamente
+        ax.tick_params(axis='x', labelsize=10) # Manter labelsize se desejado
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+        # --- FIM DA CORREÇÃO ---
+        
+        ax.grid(True, linestyle='--', alpha=0.6, axis='y')
+        ax.set_ylim(0, 1.05)
+
+        for p in ax.patches:
+            ax.annotate(f"{p.get_height():.3f}", 
+                           (p.get_x() + p.get_width() / 2., p.get_height()), 
+                           ha='center', va='bottom',
+                           xytext=(0, 5), 
+                           textcoords='offset points', fontsize=7, rotation=45)
+
+        PlottingUtils.save_plot(fig, output_dir, "per_class_metrics_comparison.png")
+
+    @staticmethod
+    def plot_threshold_tuning_curves(y_true_class: np.ndarray, y_probs_class: np.ndarray, 
+                                    class_name: str, output_dir: str) -> float:
+        if y_true_class is None or y_probs_class is None or len(y_true_class) == 0 or len(y_probs_class) == 0:
+            logger.warning(f"⚠️ y_true ou y_probs é None ou vazio para a classe {class_name}. Pulando plot de threshold tuning.")
+            return 0.5 
+        
+        if len(np.unique(y_true_class)) < 2:
+            logger.warning(f"⚠️ A classe {class_name} tem apenas uma classe presente nos dados verdadeiros. "
+                           "Não é possível calcular curvas PR/F1 ou encontrar threshold ótimo. Usando 0.5.")
+            return 0.5
+
+        precisions, recalls, thresholds_pr = precision_recall_curve(y_true_class, y_probs_class)
+        f1_scores = []
+        min_len = min(len(precisions), len(recalls), len(thresholds_pr) +1)
+
+        for i in range(min_len -1):
+            p = precisions[i]
+            r = recalls[i]
+            if p + r == 0:
+                f1_scores.append(0.0)
+            else:
+                f1_scores.append(2 * (p * r) / (p + r))
+        
+        if not f1_scores:
+             logger.warning(f"⚠️ Não foi possível calcular F1 scores para a classe {class_name}. Usando threshold padrão 0.5.")
+             optimal_threshold = 0.5
+             max_f1_score = 0.0
+        else:
+            optimal_idx = np.argmax(f1_scores)
+            optimal_threshold = thresholds_pr[optimal_idx]
+            max_f1_score = f1_scores[optimal_idx]
+
         fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(thresholds_pr[:len(f1_scores)], precisions[:len(f1_scores)], label='Precision', color=PlottingUtils.COLORS[0])
+        ax.plot(thresholds_pr[:len(f1_scores)], recalls[:len(f1_scores)], label='Recall', color=PlottingUtils.COLORS[1])
+        ax.plot(thresholds_pr[:len(f1_scores)], f1_scores, label='F1-Score', color=PlottingUtils.COLORS[2], linestyle='--')
+        ax.scatter(optimal_threshold, max_f1_score, marker='o', s=80, color='red', zorder=5, label=f'Ótimo F1 ({max_f1_score:.3f}) @ thr={optimal_threshold:.3f}')
         
-        ax.plot(df['global_step'], df['train_loss'], 'b-', label='Train Loss', linewidth=2)
-        ax.set_xlabel('Global Step')
-        ax.set_ylabel('Loss')
-        ax.set_title('Curva de Loss de Treinamento')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.set_title(f'Ajuste de Threshold para {class_name}', fontsize=14)
+        ax.set_xlabel('Threshold de Classificação', fontsize=12)
+        ax.set_ylabel('Score', fontsize=12)
+        ax.legend(fontsize=10)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        PlottingUtils.save_plot(fig, output_dir, f"threshold_tuning_{class_name.replace(' ', '_').lower()}.png")
         
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-
-class MetricsVisualizer:
-    """Visualizador para métricas de classificação."""
-    
-    @staticmethod
-    def plot_confusion_matrices(y_true: np.ndarray, y_pred: np.ndarray, 
-                              labels: List[str] = None, save_path: str = "confusion_matrices.png"):
-        """
-        Plota matrizes de confusão para cada classe.
-        
-        Args:
-            y_true: Labels verdadeiros
-            y_pred: Predições
-            labels: Nomes das classes
-            save_path: Caminho para salvar
-        """
-        from sklearn.metrics import multilabel_confusion_matrix
-        
-        labels = labels or LABELS
-        cm_multilabel = multilabel_confusion_matrix(y_true, y_pred)
-        
-        # Calcular layout da grid
-        n_classes = len(labels)
-        n_cols = min(3, n_classes)
-        n_rows = (n_classes + n_cols - 1) // n_cols
-        
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
-        if n_classes == 1:
-            axes = [axes]
-        elif n_rows == 1:
-            axes = [axes]
-        else:
-            axes = axes.flatten()
-        
-        for i, label in enumerate(labels):
-            cm = cm_multilabel[i]
-            
-            # Plotar matriz de confusão
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[i],
-                       xticklabels=['Negative', 'Positive'],
-                       yticklabels=['Negative', 'Positive'])
-            axes[i].set_title(f'{label}\n(TN={cm[0,0]}, FP={cm[0,1]}, FN={cm[1,0]}, TP={cm[1,1]})')
-            axes[i].set_xlabel('Predicted')
-            axes[i].set_ylabel('True')
-        
-        # Esconder axes vazios
-        for i in range(n_classes, len(axes)):
-            axes[i].set_visible(False)
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Matrizes de confusão salvas em: {save_path}")
-    
-    @staticmethod
-    def plot_metrics_per_class(per_class_metrics: Dict[str, Dict[str, float]], 
-                             save_path: str = "metrics_per_class.png"):
-        """
-        Plota métricas por classe em barplot.
-        
-        Args:
-            per_class_metrics: Métricas por classe
-            save_path: Caminho para salvar
-        """
-        # Preparar dados
-        classes = list(per_class_metrics.keys())
-        metrics_names = ['f1', 'precision', 'recall']
-        
-        data = []
-        for class_name in classes:
-            for metric in metrics_names:
-                if metric in per_class_metrics[class_name]:
-                    data.append({
-                        'Class': class_name,
-                        'Metric': metric.capitalize(),
-                        'Score': per_class_metrics[class_name][metric]
-                    })
-        
-        df_metrics = pd.DataFrame(data)
-        
-        # Plotar
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        sns.barplot(data=df_metrics, x='Class', y='Score', hue='Metric', ax=ax)
-        ax.set_title('Métricas por Classe')
-        ax.set_xlabel('Classes')
-        ax.set_ylabel('Score')
-        ax.legend(title='Métrica')
-        plt.xticks(rotation=45, ha='right')
-        
-        # Adicionar valores no topo das barras
-        for container in ax.containers:
-            ax.bar_label(container, fmt='%.3f', size=8)
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Métricas por classe salvas em: {save_path}")
-    
-    @staticmethod
-    def plot_class_distribution(y_true: np.ndarray, labels: List[str] = None, 
-                              save_path: str = "class_distribution.png"):
-        """
-        Plota distribuição de classes no dataset.
-        
-        Args:
-            y_true: Labels verdadeiros
-            labels: Nomes das classes
-            save_path: Caminho para salvar
-        """
-        labels = labels or LABELS
-        
-        # Calcular contagens
-        class_counts = y_true.sum(axis=0)
-        total_samples = len(y_true)
-        percentages = (class_counts / total_samples) * 100
-        
-        # Plotar
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        
-        # Gráfico de barras
-        bars = ax1.bar(labels, class_counts, color='skyblue', alpha=0.7)
-        ax1.set_title('Distribuição de Classes (Contagem)')
-        ax1.set_xlabel('Classes')
-        ax1.set_ylabel('Número de Amostras')
-        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
-        
-        # Adicionar valores nas barras
-        for bar, count in zip(bars, class_counts):
-            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + total_samples*0.01,
-                    f'{int(count)}', ha='center', va='bottom')
-        
-        # Gráfico de pizza
-        wedges, texts, autotexts = ax2.pie(class_counts, labels=labels, autopct='%1.1f%%',
-                                          startangle=90)
-        ax2.set_title('Distribuição de Classes (Percentual)')
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Distribuição de classes salva em: {save_path}")
-
-class CurvesVisualizer:
-    """Visualizador para curvas PR e ROC."""
-    
-    @staticmethod
-    def plot_precision_recall_curves(y_true: np.ndarray, y_probs: np.ndarray, 
-                                    labels: List[str] = None, 
-                                    save_path: str = "precision_recall_curves.png"):
-        """
-        Plota curvas Precision-Recall para cada classe.
-        
-        Args:
-            y_true: Labels verdadeiros
-            y_probs: Probabilidades preditas
-            labels: Nomes das classes
-            save_path: Caminho para salvar
-        """
-        from sklearn.metrics import precision_recall_curve, average_precision_score
-        
-        labels = labels or LABELS
-        
-        # Calcular layout da grid
-        n_classes = len(labels)
-        n_cols = min(3, n_classes)
-        n_rows = (n_classes + n_cols - 1) // n_cols
-        
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
-        if n_classes == 1:
-            axes = [axes]
-        elif n_rows == 1:
-            axes = [axes]
-        else:
-            axes = axes.flatten()
-        
-        for i, label in enumerate(labels):
-            precision, recall, _ = precision_recall_curve(y_true[:, i], y_probs[:, i])
-            avg_precision = average_precision_score(y_true[:, i], y_probs[:, i])
-            
-            axes[i].plot(recall, precision, linewidth=2, 
-                        label=f'AP = {avg_precision:.3f}')
-            axes[i].set_xlabel('Recall')
-            axes[i].set_ylabel('Precision')
-            axes[i].set_title(f'Curva PR - {label}')
-            axes[i].legend()
-            axes[i].grid(True, alpha=0.3)
-            axes[i].set_xlim([0, 1])
-            axes[i].set_ylim([0, 1])
-        
-        # Esconder axes vazios
-        for i in range(n_classes, len(axes)):
-            axes[i].set_visible(False)
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Curvas PR salvas em: {save_path}")
-    
-    @staticmethod
-    def plot_roc_curves(y_true: np.ndarray, y_probs: np.ndarray, 
-                       labels: List[str] = None, save_path: str = "roc_curves.png"):
-        """
-        Plota curvas ROC para cada classe.
-        
-        Args:
-            y_true: Labels verdadeiros
-            y_probs: Probabilidades preditas
-            labels: Nomes das classes
-            save_path: Caminho para salvar
-        """
-        from sklearn.metrics import roc_curve, auc
-        
-        labels = labels or LABELS
-        
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        for i, label in enumerate(labels):
-            # Verificar se há amostras positivas e negativas
-            if len(np.unique(y_true[:, i])) <= 1:
-                logger.warning(f"Classe '{label}' só tem uma classe, pulando curva ROC")
-                continue
-            
-            fpr, tpr, _ = roc_curve(y_true[:, i], y_probs[:, i])
-            roc_auc = auc(fpr, tpr)
-            
-            ax.plot(fpr, tpr, linewidth=2, 
-                   label=f'{label} (AUC = {roc_auc:.3f})')
-        
-        # Linha diagonal
-        ax.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Random')
-        
-        ax.set_xlabel('False Positive Rate')
-        ax.set_ylabel('True Positive Rate')
-        ax.set_title('Curvas ROC por Classe')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0, 1])
-        ax.set_ylim([0, 1])
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Curvas ROC salvas em: {save_path}")
-
-class ThresholdVisualizer:
-    """Visualizador para análise de limiares."""
-    
-    @staticmethod
-    def plot_threshold_analysis(y_true: np.ndarray, y_probs: np.ndarray, 
-                              labels: List[str] = None, 
-                              save_path: str = "threshold_analysis.png"):
-        """
-        Plota análise de F1 vs threshold para cada classe.
-        
-        Args:
-            y_true: Labels verdadeiros
-            y_probs: Probabilidades preditas
-            labels: Nomes das classes
-            save_path: Caminho para salvar
-        """
-        from sklearn.metrics import f1_score
-        
-        labels = labels or LABELS
-        thresholds = np.linspace(0.1, 0.9, 50)
-        
-        # Calcular layout da grid
-        n_classes = len(labels)
-        n_cols = min(3, n_classes)
-        n_rows = (n_classes + n_cols - 1) // n_cols
-        
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 4*n_rows))
-        if n_classes == 1:
-            axes = [axes]
-        elif n_rows == 1:
-            axes = [axes]
-        else:
-            axes = axes.flatten()
-        
-        optimal_thresholds = {}
-        
-        for i, label in enumerate(labels):
-            f1_scores = []
-            
-            for threshold in thresholds:
-                y_pred_class = (y_probs[:, i] >= threshold).astype(int)
-                f1 = f1_score(y_true[:, i], y_pred_class, zero_division=0)
-                f1_scores.append(f1)
-            
-            # Encontrar threshold ótimo
-            best_idx = np.argmax(f1_scores)
-            best_threshold = thresholds[best_idx]
-            best_f1 = f1_scores[best_idx]
-            optimal_thresholds[label] = (best_threshold, best_f1)
-            
-            # Plotar
-            axes[i].plot(thresholds, f1_scores, 'b-', linewidth=2)
-            axes[i].axvline(best_threshold, color='red', linestyle='--', alpha=0.7)
-            axes[i].set_xlabel('Threshold')
-            axes[i].set_ylabel('F1 Score')
-            axes[i].set_title(f'{label}\nÓtimo: {best_threshold:.3f} (F1={best_f1:.3f})')
-            axes[i].grid(True, alpha=0.3)
-            axes[i].set_xlim([0.1, 0.9])
-        
-        # Esconder axes vazios
-        for i in range(n_classes, len(axes)):
-            axes[i].set_visible(False)
-        
-        plt.tight_layout()
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Análise de threshold salva em: {save_path}")
-        
-        # Log thresholds ótimos
-        logger.info("🎯 Thresholds ótimos por classe:")
-        for label, (threshold, f1) in optimal_thresholds.items():
-            logger.info(f"  {label}: {threshold:.3f} (F1={f1:.3f})")
-        
-        return optimal_thresholds
+        logger.info(f"🎯 Threshold ótimo para {class_name} (max F1): {optimal_threshold:.4f} (F1: {max_f1_score:.4f})")
+        return optimal_threshold
 
 class VisualizationSuite:
-    """Suite completa de visualizações."""
-    
-    def __init__(self, output_dir: str = "visualizations"):
-        """
-        Inicializa suite de visualizações.
-        
-        Args:
-            output_dir: Diretório para salvar visualizações
-        """
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
-    
-    def generate_all_plots(self, training_history: Dict, y_true: np.ndarray, 
-                          y_pred: np.ndarray, y_probs: np.ndarray, 
-                          per_class_metrics: Dict, labels: List[str] = None):
-        """
-        Gera todas as visualizações.
-        
-        Args:
-            training_history: Histórico de treinamento
-            y_true: Labels verdadeiros
-            y_pred: Predições binárias
-            y_probs: Probabilidades
-            per_class_metrics: Métricas por classe
-            labels: Nomes das classes
-        """
-        logger.info(f"\n🎨 Gerando visualizações em: {self.output_dir}")
-        
-        # Curvas de treinamento
-        TrainingVisualizer.plot_training_curves(
-            training_history, 
-            os.path.join(self.output_dir, "training_curves.png")
-        )
-        
-        # Distribuição de classes
-        MetricsVisualizer.plot_class_distribution(
-            y_true, labels, 
-            os.path.join(self.output_dir, "class_distribution.png")
-        )
-        
-        # Matrizes de confusão
-        MetricsVisualizer.plot_confusion_matrices(
-            y_true, y_pred, labels,
-            os.path.join(self.output_dir, "confusion_matrices.png")
-        )
-        
-        # Métricas por classe
-        MetricsVisualizer.plot_metrics_per_class(
-            per_class_metrics,
-            os.path.join(self.output_dir, "metrics_per_class.png")
-        )
-        
-        # Curvas PR
-        CurvesVisualizer.plot_precision_recall_curves(
-            y_true, y_probs, labels,
-            os.path.join(self.output_dir, "precision_recall_curves.png")
-        )
-        
-        # Curvas ROC
-        CurvesVisualizer.plot_roc_curves(
-            y_true, y_probs, labels,
-            os.path.join(self.output_dir, "roc_curves.png")
-        )
-        
-        # Análise de threshold
-        optimal_thresholds = ThresholdVisualizer.plot_threshold_analysis(
-            y_true, y_probs, labels,
-            os.path.join(self.output_dir, "threshold_analysis.png")
-        )
-        
-        logger.info("✅ Todas as visualizações foram geradas!")
-        
+    def __init__(self, output_base_dir: str):
+        self.output_base_dir = output_base_dir
+        os.makedirs(self.output_base_dir, exist_ok=True)
+        self.labels_list = LABELS
+
+    def generate_all_plots(self, 
+                           training_history: Dict[str, List[Any]],
+                           y_true_test: np.ndarray, 
+                           y_pred_test: np.ndarray, 
+                           y_probs_test: np.ndarray,
+                           per_class_metrics: Optional[Dict[str, Dict[str, float]]] = None
+                           ) -> Dict[str, float]:
+        logger.info(f"\n🎨 Gerando visualizações em: {self.output_base_dir}")
+
+        if training_history:
+            TrainingVisualizer.plot_training_curves(training_history, self.output_base_dir)
+        else:
+            logger.warning("⚠️ Histórico de treinamento não disponível. Pulando plot de curvas de aprendizado.")
+
+        if y_true_test is not None and y_probs_test is not None:
+            EvaluationVisualizer.plot_roc_curves(y_true_test, y_probs_test, self.output_base_dir, self.labels_list)
+            EvaluationVisualizer.plot_precision_recall_curves(y_true_test, y_probs_test, self.output_base_dir, self.labels_list)
+        else:
+            logger.warning("⚠️ y_true_test ou y_probs_test não disponíveis. Pulando plots de ROC e PR.")
+
+        if y_true_test is not None and y_pred_test is not None:
+            EvaluationVisualizer.plot_confusion_matrices(y_true_test, y_pred_test, self.output_base_dir, self.labels_list)
+        else:
+            logger.warning("⚠️ y_true_test ou y_pred_test não disponíveis. Pulando plot de matrizes de confusão.")
+            
+        if per_class_metrics:
+            EvaluationVisualizer.plot_per_class_metrics_comparison(per_class_metrics, self.output_base_dir)
+        else:
+            logger.warning("⚠️ Métricas por classe não disponíveis. Pulando plot de comparação.")
+
+        optimal_thresholds: Dict[str, float] = {}
+        if y_true_test is not None and y_probs_test is not None:
+            logger.info("📈 Gerando curvas de ajuste de threshold por classe...")
+            if y_true_test.ndim == 1:
+                 y_true_reshaped = y_true_test.reshape(-1,1)
+                 y_probs_reshaped = y_probs_test.reshape(-1,1)
+                 num_classes_for_thresh = 1
+                 labels_for_thresh = [self.labels_list[0] if self.labels_list else "Classe Única"]
+            else:
+                 y_true_reshaped = y_true_test
+                 y_probs_reshaped = y_probs_test
+                 num_classes_for_thresh = y_true_test.shape[1]
+                 labels_for_thresh = self.labels_list
+
+            if num_classes_for_thresh == len(labels_for_thresh):
+                for i in range(num_classes_for_thresh):
+                    class_name = labels_for_thresh[i]
+                    optimal_threshold = EvaluationVisualizer.plot_threshold_tuning_curves(
+                        y_true_reshaped[:, i],
+                        y_probs_reshaped[:, i],
+                        class_name,
+                        self.output_base_dir
+                    )
+                    optimal_thresholds[class_name] = optimal_threshold
+            else:
+                logger.error(f"❌ Disparidade no número de classes ({num_classes_for_thresh}) e labels ({len(labels_for_thresh)}) para ajuste de threshold.")
+                for class_name in self.labels_list:
+                    optimal_thresholds[class_name] = 0.5
+        else:
+            logger.warning("⚠️ y_true_test ou y_probs_test não disponíveis. Pulando ajuste de thresholds.")
+            for class_name in self.labels_list:
+                optimal_thresholds[class_name] = 0.5
+
+        logger.info("✅ Todas as visualizações foram geradas.")
         return optimal_thresholds

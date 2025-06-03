@@ -14,6 +14,8 @@ import numpy as np # Adicionado para checar o tipo ndarray
 
 from src.config import ModelConfig, LossConfig, DATASET_PATH, NUM_LABELS 
 
+import torch
+
 logger = logging.getLogger(__name__)
 
 class ConfigurationManager:
