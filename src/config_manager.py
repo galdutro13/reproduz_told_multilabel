@@ -456,7 +456,7 @@ class BatchExecutor:
                     instance_id_res = results_dict.get('instance_id', 'N/A')
                     # Encontrar a config original para pegar o nome
                     original_config = next((cfg for cfg, res in self.all_results if res.get('instance_id') == instance_id_res), None)
-                    instance_name = original_config[0].get('name', 'N/A')[:25] if original_config else 'N/A'
+                    instance_name = original_config.get('name', 'N/A')[:25] if original_config else 'N/A'
                     
                     test_metrics = results_dict.get('test_metrics', {})
                     f1_score = test_metrics.get('test_macro_f1', 0.0)
