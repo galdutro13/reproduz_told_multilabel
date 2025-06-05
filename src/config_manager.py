@@ -11,6 +11,7 @@ from dataclasses import asdict
 import logging
 from datetime import datetime
 import numpy as np # Adicionado para checar o tipo ndarray
+import shutil  # Adicionado para copiar arquivos
 
 from src.config import ModelConfig, LossConfig, DATASET_PATH, NUM_LABELS 
 
@@ -19,7 +20,6 @@ import torch
 logger = logging.getLogger(__name__)
 
 class ConfigurationManager:
-    # ... (código da ConfigurationManager permanece o mesmo) ...
     @staticmethod
     def load_config_file(config_path: str) -> Dict[str, Any]:
         """
@@ -216,7 +216,7 @@ class InstanceExecutor:
         from src.data import MultiLabelDataset, calculate_class_weights
         from src.training import TrainingManager
         from src.metrics import DetailedMetricsAnalyzer
-        from src.visualization import VisualizationSuite # Supondo que este é o nome correto
+        from src.visualization import VisualizationSuite
         import torch
         
         # Criar modelo e tokenizer
@@ -224,7 +224,7 @@ class InstanceExecutor:
         ModelValidator.validate_model_config(model, NUM_LABELS) 
         
         # Calcular alpha weights se necessário
-        if loss_config.use_focal_loss and loss_config.focal_alpha_weights is None: # Modificado para checar se já não foi setado
+        if loss_config.use_focal_loss and loss_config.focal_alpha_weights is None:
             loss_config.focal_alpha_weights = calculate_class_weights(train_df)
         
         # Criar datasets
@@ -254,22 +254,22 @@ class InstanceExecutor:
         trainer = training_manager.setup_trainer(model, tokenizer, train_dataset, val_dataset)
         train_result, training_history = training_manager.train()
         
-        # Avaliação
-        test_metrics, test_probs = training_manager.evaluate(test_dataset)
+        # IMPORTANTE: Avaliação usando o MELHOR modelo (não o último)
+        test_metrics, test_probs = training_manager.evaluate(test_dataset, load_best_model=True)
         
         # Análise detalhada
         y_true_list = [test_dataset[i]['labels'] for i in range(len(test_dataset))]
-        if not y_true_list: # Checagem de segurança
+        if not y_true_list:
             logger.error("❌ Test dataset resultou em y_true vazio. Impossível continuar com análise detalhada e visualizações.")
             raise ValueError("y_true está vazio após coleta do test_dataset.")
 
         y_true = torch.stack(y_true_list).numpy()
-        y_pred = (test_probs >= 0.5).astype(int) # Thresholding padrão
+        y_pred = (test_probs >= 0.5).astype(int)
         
         analyzer = DetailedMetricsAnalyzer()
         detailed_metrics = analyzer.calculate_detailed_metrics(y_true, y_pred, test_probs)
         
-        # ---- INÍCIO DO CÓDIGO DE DEBUG ----
+        # Log de debug (mantido do código original)
         logger.info("---- DEBUG: Informações para VisualizationSuite.generate_all_plots ----")
         if training_history:
             for key, value in training_history.items():
@@ -299,25 +299,71 @@ class InstanceExecutor:
         else:
             logger.info("DEBUG: detailed_metrics['per_class_metrics'] não disponível.")
         logger.info("---- FIM DO CÓDIGO DE DEBUG ----")
-        # ---- FIM DO CÓDIGO DE DEBUG ----
         
         # Visualizações
-        # Supondo que VisualizationSuite está em src.visualization
         viz_suite = VisualizationSuite(os.path.join(instance_dir, "visualizations"))
         optimal_thresholds = viz_suite.generate_all_plots(
             training_history, y_true, y_pred, test_probs, 
             detailed_metrics['per_class_metrics']
         )
         
+        # NOVO: Garantir que o melhor modelo seja salvo como modelo final da instância
+        best_model_dir = model_config.best_model_dir
+        final_model_dir = os.path.join(instance_dir, "final_model")
+        
+        if os.path.exists(best_model_dir):
+            logger.info(f"🏆 Copiando melhor modelo para diretório final: {final_model_dir}")
+            os.makedirs(final_model_dir, exist_ok=True)
+            
+            # Copiar todos os arquivos do melhor modelo
+            for filename in os.listdir(best_model_dir):
+                src_path = os.path.join(best_model_dir, filename)
+                dst_path = os.path.join(final_model_dir, filename)
+                if os.path.isfile(src_path):
+                    shutil.copy2(src_path, dst_path)
+            
+            # Adicionar informações sobre o melhor modelo aos resultados
+            best_model_metadata_path = os.path.join(best_model_dir, "best_model_metadata.json")
+            if os.path.exists(best_model_metadata_path):
+                import json
+                with open(best_model_metadata_path, 'r') as f:
+                    best_model_info = json.load(f)
+                    
+                # Adicionar aos resultados
+                results_best_model_info = {
+                    'best_checkpoint_step': best_model_info.get('best_checkpoint_step'),
+                    'best_checkpoint_epoch': best_model_info.get('best_checkpoint_epoch'),
+                    'best_metric_value': best_model_info.get('best_metric_value'),
+                    'best_metric_name': best_model_info.get('best_metric_name')
+                }
+            else:
+                results_best_model_info = None
+        else:
+            logger.warning("⚠️ Diretório do melhor modelo não encontrado. Usando último checkpoint.")
+            # Copiar o modelo do output_dir como fallback
+            final_model_dir = os.path.join(instance_dir, "final_model")
+            os.makedirs(final_model_dir, exist_ok=True)
+            
+            for filename in ["pytorch_model.bin", "config.json", "tokenizer_config.json", 
+                           "tokenizer.json", "special_tokens_map.json", "vocab.txt"]:
+                src_path = os.path.join(model_config.output_dir, filename)
+                dst_path = os.path.join(final_model_dir, filename)
+                if os.path.exists(src_path):
+                    shutil.copy2(src_path, dst_path)
+            
+            results_best_model_info = None
+        
         # Compilar resultados
         results = {
             'instance_id': instance_id,
             'test_metrics': test_metrics,
             'detailed_metrics': detailed_metrics,
-            'optimal_thresholds': optimal_thresholds, # Assegure que isso é serializável
+            'optimal_thresholds': optimal_thresholds,
             'training_time': train_result.metrics.get('train_runtime', 0),
-            'best_eval_metric': (max(training_history.get('eval_avg_precision', [0.0])) # Chave atualizada e default
-                                if training_history.get('eval_avg_precision') else None)
+            'best_eval_metric': (max(training_history.get('eval_avg_precision', [0.0]))
+                                if training_history.get('eval_avg_precision') else None),
+            'best_model_info': results_best_model_info,  # NOVO: informações do melhor modelo
+            'final_model_path': final_model_dir  # NOVO: caminho do modelo final
         }
         
         # Salvar resultados
@@ -373,7 +419,6 @@ class InstanceExecutor:
             json.dump(serializable_results, f, indent=2, ensure_ascii=False)
 
 class BatchExecutor:
-    # ... (código da BatchExecutor permanece o mesmo, mas certifique-se de que as métricas no relatório são robustas) ...
     def __init__(self, dataset_path: str = DATASET_PATH):
         self.dataset_path = dataset_path
         self.all_results = []
@@ -391,7 +436,7 @@ class BatchExecutor:
         from src.data import DataPersistence
         
         # Carregar configuração
-        config_data = ConfigurationManager.load_config_file(config_path) # Renomeado para config_data
+        config_data = ConfigurationManager.load_config_file(config_path)
         instances = config_data['instances']
         
         logger.info(f"\n📋 Executando {len(instances)} instâncias")
@@ -475,8 +520,18 @@ class BatchExecutor:
                     best_ap_result = sorted_results[0] # Já está ordenado por avg_precision
                     best_ap_id = best_ap_result.get('instance_id', 'N/A')
                     best_ap_val = best_ap_result.get('test_metrics', {}).get('test_avg_precision', 0.0)
-                    f.write(f"Melhor Avg Precision: {best_ap_id} ({best_ap_val:.4f})\n")
-                else: # Embora já verificado por successful_executions, é uma dupla checagem
+                    
+                    # Informações do melhor modelo se disponível
+                    best_model_info = best_ap_result.get('best_model_info')
+                    if best_model_info:
+                        f.write(f"🏆 Melhor modelo: {best_ap_id}\n")
+                        f.write(f"   Test Avg Precision: {best_ap_val:.4f}\n")
+                        f.write(f"   Validation Avg Precision: {best_model_info.get('best_metric_value', 'N/A'):.4f}\n")
+                        f.write(f"   Best checkpoint step: {best_model_info.get('best_checkpoint_step', 'N/A')}\n")
+                        f.write(f"   Modelo salvo em: {best_ap_result.get('final_model_path', 'N/A')}\n")
+                    else:
+                        f.write(f"Melhor Avg Precision: {best_ap_id} ({best_ap_val:.4f})\n")
+                else:
                     f.write("Nenhuma execução bem-sucedida para determinar o melhor modelo.\n")
             
             if failed_executions_count > 0:
@@ -494,7 +549,6 @@ class BatchExecutor:
 
 
 def create_simple_config_example() -> str:
-    # ... (código de create_simple_config_example permanece o mesmo) ...
     config = {
         "instances": [
             {

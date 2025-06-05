@@ -2,6 +2,7 @@
 """
 Treinamento customizado e callbacks para modelos BERT multi-label.
 VERSÃO COMPLETA CORRIGIDA - Com correção para transformers 4.48.x e torch.compile
++ MELHORIA: Garantia de salvamento e uso do melhor modelo
 """
 
 import torch
@@ -15,6 +16,8 @@ from transformers import (
 )
 import logging
 import math
+import os
+import shutil
 
 from src.config import ModelConfig, LossConfig
 from src.losses import LossFactory
@@ -116,6 +119,88 @@ class ProgressCallback(TrainerCallback):
             self.epoch_bar = None
         logger.info("\n✅ Treinamento concluído!")
 
+class BestModelTracker(TrainerCallback):
+    """Callback para rastrear e salvar o melhor modelo permanentemente."""
+    
+    def __init__(self, best_model_path: str, metric_name: str = "eval_avg_precision"):
+        self.best_model_path = best_model_path
+        self.metric_name = metric_name
+        self.best_metric_value = None
+        self.best_model_checkpoint = None
+        
+    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, 
+                    metrics: Optional[Dict[str, float]] = None, logs: Optional[Dict[str, float]] = None, **kwargs):
+        """Chamado após cada avaliação."""
+        if not metrics:
+            return
+            
+        current_metric = metrics.get(self.metric_name)
+        if current_metric is None:
+            return
+            
+        # Primeira avaliação ou modelo melhorou
+        if self.best_metric_value is None or current_metric > self.best_metric_value:
+            self.best_metric_value = current_metric
+            self.best_model_checkpoint = state.global_step
+            
+            logger.info(f"🏆 Novo melhor modelo encontrado! {self.metric_name}={current_metric:.4f} (step {state.global_step})")
+            
+            # Salvar checkpoint atual como melhor modelo
+            # O modelo atual está no output_dir/checkpoint-{global_step}
+            current_checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+            
+            # Aguardar o checkpoint ser salvo (pode haver um pequeno delay)
+            import time
+            max_wait = 30  # segundos
+            wait_interval = 0.5
+            waited = 0
+            
+            while not os.path.exists(current_checkpoint_dir) and waited < max_wait:
+                time.sleep(wait_interval)
+                waited += wait_interval
+                
+            if os.path.exists(current_checkpoint_dir):
+                # Criar diretório do melhor modelo se não existir
+                os.makedirs(self.best_model_path, exist_ok=True)
+                
+                # Copiar arquivos do checkpoint para o diretório do melhor modelo
+                logger.info(f"💾 Salvando melhor modelo em: {self.best_model_path}")
+                
+                # Arquivos essenciais do modelo
+                essential_files = [
+                    "pytorch_model.bin",
+                    "config.json", 
+                    "tokenizer_config.json",
+                    "tokenizer.json",
+                    "special_tokens_map.json",
+                    "vocab.txt"
+                ]
+                
+                for filename in essential_files:
+                    src_path = os.path.join(current_checkpoint_dir, filename)
+                    dst_path = os.path.join(self.best_model_path, filename)
+                    
+                    if os.path.exists(src_path):
+                        shutil.copy2(src_path, dst_path)
+                        
+                # Salvar metadados do melhor modelo
+                import json
+                metadata = {
+                    "best_metric_value": float(current_metric),
+                    "best_metric_name": self.metric_name,
+                    "best_checkpoint_step": state.global_step,
+                    "best_checkpoint_epoch": state.epoch,
+                    "timestamp": pd.Timestamp.now().isoformat()
+                }
+                
+                metadata_path = os.path.join(self.best_model_path, "best_model_metadata.json")
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                    
+                logger.info(f"✅ Melhor modelo salvo permanentemente!")
+            else:
+                logger.warning(f"⚠️ Checkpoint {current_checkpoint_dir} não encontrado após espera")
+
 class EarlyStoppingCallback(TrainerCallback):
     """Callback para early stopping baseado em métrica de validação."""
     
@@ -129,11 +214,11 @@ class EarlyStoppingCallback(TrainerCallback):
         self.patience_counter = 0
         self.stopped_epoch = 0
 
-    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, logs: Optional[Dict[str, float]] = None, **kwargs):
-        if not logs:
+    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, metrics: Optional[Dict[str, float]] = None, **kwargs):
+        if not metrics:
             return
         
-        current_metric_value = logs.get(self.metric_to_monitor)
+        current_metric_value = metrics.get(self.metric_to_monitor)
         if current_metric_value is None:
             logger.warning(f"⚠️ Métrica de early stopping '{self.metric_to_monitor}' não encontrada nos logs de avaliação atuais (step {state.global_step}). Verifique se está sendo calculada e logada.")
             return
@@ -339,16 +424,22 @@ class TrainingManager:
         self.use_contiguity_fix = use_contiguity_fix
         self.trainer: Optional[MultiLabelTrainer] = None
         self.training_history: Dict[str, List[Any]] = {}
+        self.best_model_metadata: Optional[Dict[str, Any]] = None
         
     def setup_trainer(self, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
                      train_dataset: MultiLabelDataset, eval_dataset: Optional[MultiLabelDataset] = None) -> MultiLabelTrainer:
         training_args = self.config.to_training_args()
         callbacks: List[TrainerCallback] = [ProgressCallback()]
         
+        # Adicionar BestModelTracker
+        best_model_tracker = BestModelTracker(
+            best_model_path=self.config.best_model_dir,
+            metric_name=self.config.metric_for_best_model
+        )
+        callbacks.append(best_model_tracker)
+        
         if eval_dataset is not None and self.config.evaluate_during_training:
             metric_name_for_early_stopping = self.config.metric_for_best_model
-            if not metric_name_for_early_stopping.startswith("eval_"):
-                metric_name_for_early_stopping = f"eval_{self.config.metric_for_best_model}"
             early_stopping = EarlyStoppingCallback(
                 patience=getattr(self.config, 'early_stopping_patience', 3), 
                 min_delta=getattr(self.config, 'early_stopping_threshold', 0.001),
@@ -383,16 +474,56 @@ class TrainingManager:
         logger.info("\n🚀 Iniciando treinamento...")
         self._log_training_info()
         train_result = self.trainer.train()
-        logger.info("\n💾 Salvando modelo final e estado do trainer...")
-        self.trainer.save_model() 
+        
+        # Após o treinamento, garantir que o melhor modelo seja carregado
+        if self.config.load_best_model_at_end and os.path.exists(self.config.best_model_dir):
+            logger.info(f"\n🏆 Carregando melhor modelo de: {self.config.best_model_dir}")
+            # O trainer já deve ter carregado o melhor modelo, mas vamos garantir
+            best_model_files = os.listdir(self.config.best_model_dir)
+            if "pytorch_model.bin" in best_model_files:
+                # Copiar melhor modelo para output_dir principal
+                logger.info(f"💾 Copiando melhor modelo para diretório de saída principal: {self.config.output_dir}")
+                for filename in best_model_files:
+                    src = os.path.join(self.config.best_model_dir, filename)
+                    dst = os.path.join(self.config.output_dir, filename)
+                    if os.path.isfile(src):
+                        shutil.copy2(src, dst)
+                        
+                # Carregar metadados do melhor modelo
+                metadata_path = os.path.join(self.config.best_model_dir, "best_model_metadata.json")
+                if os.path.exists(metadata_path):
+                    import json
+                    with open(metadata_path, 'r') as f:
+                        self.best_model_metadata = json.load(f)
+                    logger.info(f"📊 Melhor modelo: step={self.best_model_metadata.get('best_checkpoint_step')}, "
+                              f"{self.best_model_metadata.get('best_metric_name')}={self.best_model_metadata.get('best_metric_value'):.4f}")
+        
+        logger.info("\n💾 Salvando estado final do trainer...")
         self.trainer.save_state()
         self.training_history = self._extract_training_history()
         self._log_training_summary(train_result)
         return train_result, self.training_history
     
-    def evaluate(self, test_dataset: MultiLabelDataset) -> Tuple[Dict[str, float], np.ndarray]:
+    def evaluate(self, test_dataset: MultiLabelDataset, load_best_model: bool = True) -> Tuple[Dict[str, float], np.ndarray]:
         if self.trainer is None:
             raise ValueError("Trainer não foi configurado.")
+            
+        # Se configurado para usar o melhor modelo e ele existe
+        if load_best_model and os.path.exists(self.config.best_model_dir):
+            model_path = os.path.join(self.config.best_model_dir, "pytorch_model.bin")
+            if os.path.exists(model_path):
+                logger.info(f"\n🏆 Carregando melhor modelo para avaliação de: {self.config.best_model_dir}")
+                # Recarregar o modelo do melhor checkpoint
+                from transformers import AutoModelForSequenceClassification
+                best_model = AutoModelForSequenceClassification.from_pretrained(self.config.best_model_dir)
+                self.trainer.model = best_model
+                
+                # Log metadados se disponíveis
+                if self.best_model_metadata:
+                    logger.info(f"📊 Usando modelo do step {self.best_model_metadata.get('best_checkpoint_step')}")
+            else:
+                logger.warning(f"⚠️ Melhor modelo não encontrado em {self.config.best_model_dir}, usando modelo atual")
+        
         logger.info("\n🧪 Avaliando modelo no conjunto de teste...")
         logger.info(f"📊 Processando {len(test_dataset)} amostras...")
         predictions_output = self.trainer.predict(test_dataset, metric_key_prefix="test")
@@ -422,6 +553,7 @@ class TrainingManager:
         logger.info(f"📊 Avaliação a cada {self.config.eval_steps} steps")
         logger.info(f"💾 Salvamento a cada {self.config.save_steps} steps (limite: {self.config.save_total_limit})")
         logger.info(f"🎯 Melhor modelo será salvo baseado em: {self.config.metric_for_best_model} ({'maior' if self.config.greater_is_better else 'menor'} é melhor)")
+        logger.info(f"📁 Diretório do melhor modelo: {self.config.best_model_dir}")
         logger.info("\n" + "="*80 + "\n")
     
     def _extract_training_history(self) -> Dict[str, List[Any]]:
@@ -509,6 +641,14 @@ class TrainingManager:
             if valid_eval_avg_precision: logger.info(f"🎯 Melhor Avg Precision de validação: {max(valid_eval_avg_precision):.4f}")
         else:
             logger.info("ℹ️ Nenhuma métrica de validação registrada ou todas são NaN no histórico para resumo.")
+            
+        # Log informações do melhor modelo se disponível
+        if self.best_model_metadata:
+            logger.info("\n🏆 MELHOR MODELO:")
+            logger.info(f"  Step: {self.best_model_metadata.get('best_checkpoint_step')}")
+            logger.info(f"  Época: {self.best_model_metadata.get('best_checkpoint_epoch', 'N/A'):.2f}")
+            logger.info(f"  {self.best_model_metadata.get('best_metric_name')}: {self.best_model_metadata.get('best_metric_value'):.4f}")
+            logger.info(f"  Salvo em: {self.config.best_model_dir}")
 
 class ModelCheckpointer:
     """Utilitários para salvar e carregar checkpoints."""
@@ -555,5 +695,19 @@ class ModelCheckpointer:
                 logger.info(f"📄 Metadados de treinamento carregados de: {metadata_path}")
             except Exception as e:
                 logger.warning(f"⚠️ Erro ao carregar ou decodificar JSON de metadados em: {metadata_path} - {e}")
+        
+        # Também verificar metadados do melhor modelo
+        best_metadata_path = os.path.join(checkpoint_dir, "best_model_metadata.json")
+        if os.path.exists(best_metadata_path):
+            try:
+                with open(best_metadata_path, 'r', encoding='utf-8') as f:
+                    best_metadata = json.load(f)
+                if loaded_metadata is None:
+                    loaded_metadata = {}
+                loaded_metadata['best_model_info'] = best_metadata
+                logger.info(f"🏆 Metadados do melhor modelo carregados")
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao carregar metadados do melhor modelo: {e}")
+                
         logger.info(f"📂 Checkpoint carregado de: {checkpoint_dir}")
         return model, tokenizer, loaded_metadata

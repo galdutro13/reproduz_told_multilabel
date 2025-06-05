@@ -71,8 +71,9 @@ class ModelConfig:
     logging_steps: int = 50
     save_total_limit: int = 3
     load_best_model_at_end: bool = True
-    metric_for_best_model: str = "avg_precision"
+    metric_for_best_model: str = "eval_avg_precision"  # Changed to include eval_ prefix
     greater_is_better: bool = True
+    save_strategy: str = "steps"  # Added explicit save strategy
     use_focal_loss: bool = False
     focal_gamma: float = 2.0
     focal_alpha_weights: Optional[List[float]] = None
@@ -95,6 +96,7 @@ class ModelConfig:
             logging_steps=self.logging_steps,
             logging_first_step=self.logging_first_step,
             evaluation_strategy=self.evaluation_strategy,
+            save_strategy=self.save_strategy,  # Added explicit save strategy
             eval_steps=self.eval_steps,
             save_steps=self.save_steps,
             save_total_limit=self.save_total_limit,
