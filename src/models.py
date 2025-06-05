@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Criação e configuração de modelos BERT para classificação multi-label.
+VERSÃO COM TORCH.COMPILE MANTIDO + CORREÇÃO DE CONTIGUIDADE
 """
 
 import torch
@@ -10,13 +11,71 @@ from transformers import (
     AutoTokenizer,
     AutoConfig,
     PreTrainedModel,
-    PreTrainedTokenizer
+    PreTrainedTokenizer,
+    Trainer
 )
 import logging
 
 from src.config import ModelConfig, NUM_LABELS
 
 logger = logging.getLogger(__name__)
+
+class ContiguityFixer:
+    """Classe para corrigir problemas de contiguidade em modelos compilados."""
+    
+    @staticmethod
+    def make_state_dict_contiguous(state_dict: dict) -> dict:
+        """
+        Torna todos os tensores de um state_dict contíguos.
+        
+        Args:
+            state_dict: Dicionário de parâmetros do modelo
+            
+        Returns:
+            dict: State dict com tensores contíguos
+        """
+        contiguous_state_dict = {}
+        non_contiguous_count = 0
+        
+        for key, tensor in state_dict.items():
+            if isinstance(tensor, torch.Tensor):
+                if not tensor.is_contiguous():
+                    contiguous_state_dict[key] = tensor.contiguous()
+                    non_contiguous_count += 1
+                    logger.debug(f"Tensor tornado contíguo: {key}")
+                else:
+                    contiguous_state_dict[key] = tensor
+            else:
+                contiguous_state_dict[key] = tensor
+        
+        if non_contiguous_count > 0:
+            logger.info(f"🔧 {non_contiguous_count} tensores tornados contíguos para salvamento")
+        
+        return contiguous_state_dict
+    
+    @staticmethod
+    def patch_trainer_save_method():
+        """
+        Aplica um patch global ao Trainer para corrigir automaticamente
+        problemas de contiguidade durante salvamentos.
+        """
+        # Salva o método original
+        original_save = Trainer._save
+        
+        def patched_save(self, output_dir=None, state_dict=None):
+            """Versão corrigida do _save que torna tensores contíguos"""
+            if state_dict is None:
+                state_dict = self.model.state_dict()
+            
+            # Torna todos os tensores contíguos
+            contiguous_state_dict = ContiguityFixer.make_state_dict_contiguous(state_dict)
+            
+            # Chama o método original com tensores corrigidos
+            return original_save(self, output_dir, contiguous_state_dict)
+        
+        # Aplica o patch
+        Trainer._save = patched_save
+        logger.info("✅ Patch de contiguidade aplicado ao Trainer")
 
 class ModelFactory:
     """Factory para criação de modelos BERT."""
@@ -33,6 +92,9 @@ class ModelFactory:
             Tuple[PreTrainedModel, PreTrainedTokenizer]: Modelo e tokenizer
         """
         logger.info(f"🤖 Criando modelo: {config.model_name}")
+        
+        # APLICAR PATCH DE CONTIGUIDADE ANTES DE QUALQUER COISA
+        ContiguityFixer.patch_trainer_save_method()
         
         # Configurar modelo
         model_config = AutoConfig.from_pretrained(
@@ -56,7 +118,7 @@ class ModelFactory:
             cache_dir=config.cache_dir
         )
         
-        # Otimizar modelo se possível
+        # Otimizar modelo com torch.compile (MANTIDO!)
         model = ModelOptimizer.optimize_model(model)
         
         logger.info(f"✅ Modelo criado com {model.num_parameters():,} parâmetros")
@@ -69,7 +131,7 @@ class ModelOptimizer:
     @staticmethod
     def optimize_model(model: PreTrainedModel) -> PreTrainedModel:
         """
-        Aplica otimizações ao modelo.
+        Aplica otimizações ao modelo MANTENDO torch.compile.
         
         Args:
             model: Modelo a ser otimizado
@@ -77,25 +139,42 @@ class ModelOptimizer:
         Returns:
             PreTrainedModel: Modelo otimizado
         """
-        # Tentar torch.compile se disponível (PyTorch 2.0+)
+        # ============================================================
+        # TORCH.COMPILE MANTIDO COM CORREÇÃO DE CONTIGUIDADE
+        # ============================================================
+        
         if hasattr(torch, 'compile'):
             try:
-                optimized_model = torch.compile(model, backend='ipex')
-                logger.info("🛠️ torch.compile ativado com backend ipex")
+                # Tentar com backend mais estável primeiro
+                optimized_model = torch.compile(
+                    model, 
+                    backend='inductor',  # Backend mais estável que 'ipex'
+                    dynamic=False,       # Evita problemas de forma dinâmica
+                    fullgraph=False      # Permite fallback para partes não compiláveis
+                )
+                logger.info("🛠️ torch.compile ativado com backend inductor (estável)")
+                logger.info("✅ Correção de contiguidade ativa via patch do Trainer")
                 return optimized_model
-            except Exception as e:
-                logger.warning(f"⚠️ torch.compile falhou: {e}")
                 
-                # Tentar backend padrão
+            except Exception as e:
+                logger.warning(f"⚠️ torch.compile com inductor falhou: {e}")
+                
+                # Fallback para backend padrão
                 try:
-                    optimized_model = torch.compile(model)
+                    optimized_model = torch.compile(model, dynamic=False, fullgraph=False)
                     logger.info("🛠️ torch.compile ativado com backend padrão")
+                    logger.info("✅ Correção de contiguidade ativa via patch do Trainer")
                     return optimized_model
+                    
                 except Exception as e2:
                     logger.warning(f"⚠️ torch.compile com backend padrão falhou: {e2}")
-        
-        logger.info("📝 Usando modelo sem otimizações torch.compile")
-        return model
+                    
+                    # Se torch.compile falhar completamente, usar modelo normal
+                    logger.info("📝 Usando modelo sem torch.compile")
+                    return model
+        else:
+            logger.info("📝 torch.compile não disponível nesta versão do PyTorch")
+            return model
     
     @staticmethod
     def get_model_info(model: PreTrainedModel) -> dict:
@@ -111,10 +190,14 @@ class ModelOptimizer:
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
+        # Verificar se modelo foi compilado
+        is_compiled = hasattr(model, '_orig_mod')
+        
         return {
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
             'model_size_mb': (total_params * 4) / (1024 * 1024),  # Assumindo float32
+            'is_compiled': is_compiled,
             'config': model.config.__dict__ if hasattr(model, 'config') else {}
         }
     
@@ -133,6 +216,7 @@ class ModelOptimizer:
         logger.info(f"  Total de parâmetros: {info['total_parameters']:,}")
         logger.info(f"  Parâmetros treináveis: {info['trainable_parameters']:,}")
         logger.info(f"  Tamanho estimado: {info['model_size_mb']:.1f} MB")
+        logger.info(f"  Modelo compilado: {'✅ Sim' if info['is_compiled'] else '❌ Não'}")
         
         if info['config']:
             logger.info(f"  Configuração:")
@@ -219,3 +303,45 @@ class ModelValidator:
         except Exception as e:
             logger.error(f"❌ Erro no teste de forward pass: {e}")
             raise
+
+# ===================================================================
+# CLASSE ALTERNATIVA: TRAINER CUSTOMIZADO COM CORREÇÃO INTEGRADA
+# ===================================================================
+
+class ContiguousMultiLabelTrainer:
+    """
+    Alternativa: Trainer que já vem com correção de contiguidade integrada.
+    Use esta classe em vez do patch global se preferir.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        from src.training import MultiLabelTrainer
+        super().__init__(*args, **kwargs)
+    
+    def _save(self, output_dir=None, state_dict=None):
+        """Override do _save com correção de contiguidade."""
+        if state_dict is None:
+            state_dict = self.model.state_dict()
+        
+        # Aplicar correção de contiguidade
+        contiguous_state_dict = ContiguityFixer.make_state_dict_contiguous(state_dict)
+        
+        # Chama o método pai com state_dict corrigido
+        super()._save(output_dir, contiguous_state_dict)
+    
+    def save_model(self, output_dir=None, _internal_call=False):
+        """Override do save_model com correção de contiguidade."""
+        if output_dir is None:
+            output_dir = self.args.output_dir
+        
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        
+        logger.info(f"💾 Salvando modelo em {output_dir} (com correção de contiguidade)")
+        
+        # Usa nosso _save customizado
+        self._save(output_dir)
+        
+        # Salva o tokenizer se disponível
+        if self.tokenizer is not None:
+            self.tokenizer.save_pretrained(output_dir)

@@ -5,6 +5,7 @@
 /outputs 
 /I0*
 /wandb
+/venv_bert
 
 split_test.csv
 split_train.csv
