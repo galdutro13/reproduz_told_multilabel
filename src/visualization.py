@@ -342,41 +342,107 @@ class EvaluationVisualizer:
 
         precisions, recalls, thresholds_pr = precision_recall_curve(y_true_class, y_probs_class)
         f1_scores = []
-        min_len = min(len(precisions), len(recalls), len(thresholds_pr) +1)
+        f05_scores = []  # F0.5 gives more weight to precision
+        f2_scores = []   # F2 gives more weight to recall
+        
+        min_len = min(len(precisions), len(recalls), len(thresholds_pr) + 1)
 
-        for i in range(min_len -1):
+        for i in range(min_len - 1):
             p = precisions[i]
             r = recalls[i]
+            
+            # F1 score
             if p + r == 0:
                 f1_scores.append(0.0)
+                f05_scores.append(0.0)
+                f2_scores.append(0.0)
             else:
+                # F1 = 2 * (precision * recall) / (precision + recall)
                 f1_scores.append(2 * (p * r) / (p + r))
+                
+                # F0.5 = (1 + 0.5²) * (precision * recall) / (0.5² * precision + recall)
+                beta_05 = 0.5
+                f05_scores.append((1 + beta_05**2) * (p * r) / ((beta_05**2 * p) + r))
+                
+                # F2 = (1 + 2²) * (precision * recall) / (2² * precision + recall)
+                beta_2 = 2.0
+                f2_scores.append((1 + beta_2**2) * (p * r) / ((beta_2**2 * p) + r))
         
         if not f1_scores:
-             logger.warning(f"⚠️ Não foi possível calcular F1 scores para a classe {class_name}. Usando threshold padrão 0.5.")
-             optimal_threshold = 0.5
-             max_f1_score = 0.0
+            logger.warning(f"⚠️ Não foi possível calcular F1 scores para a classe {class_name}. Usando threshold padrão 0.5.")
+            optimal_threshold = 0.5
+            max_f1_score = 0.0
+            optimal_f05_threshold = 0.5
+            max_f05_score = 0.0
+            optimal_f2_threshold = 0.5
+            max_f2_score = 0.0
         else:
+            # Find optimal thresholds for each F-score
             optimal_idx = np.argmax(f1_scores)
             optimal_threshold = thresholds_pr[optimal_idx]
             max_f1_score = f1_scores[optimal_idx]
+            
+            optimal_f05_idx = np.argmax(f05_scores)
+            optimal_f05_threshold = thresholds_pr[optimal_f05_idx]
+            max_f05_score = f05_scores[optimal_f05_idx]
+            
+            optimal_f2_idx = np.argmax(f2_scores)
+            optimal_f2_threshold = thresholds_pr[optimal_f2_idx]
+            max_f2_score = f2_scores[optimal_f2_idx]
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(thresholds_pr[:len(f1_scores)], precisions[:len(f1_scores)], label='Precision', color=PlottingUtils.COLORS[0])
-        ax.plot(thresholds_pr[:len(f1_scores)], recalls[:len(f1_scores)], label='Recall', color=PlottingUtils.COLORS[1])
-        ax.plot(thresholds_pr[:len(f1_scores)], f1_scores, label='F1-Score', color=PlottingUtils.COLORS[2], linestyle='--')
-        ax.scatter(optimal_threshold, max_f1_score, marker='o', s=80, color='red', zorder=5, label=f'Ótimo F1 ({max_f1_score:.3f}) @ thr={optimal_threshold:.3f}')
+        fig, ax = plt.subplots(figsize=(12, 7))
+        
+        # Plot curves
+        ax.plot(thresholds_pr[:len(f1_scores)], precisions[:len(f1_scores)], 
+                label='Precision', color=PlottingUtils.COLORS[0], linewidth=2)
+        ax.plot(thresholds_pr[:len(f1_scores)], recalls[:len(f1_scores)], 
+                label='Recall', color=PlottingUtils.COLORS[1], linewidth=2)
+        ax.plot(thresholds_pr[:len(f1_scores)], f1_scores, 
+                label='F1-Score', color=PlottingUtils.COLORS[2], linestyle='--', linewidth=2)
+        ax.plot(thresholds_pr[:len(f05_scores)], f05_scores, 
+                label='F0.5-Score', color=PlottingUtils.COLORS[3], linestyle=':', linewidth=1.5, alpha=0.8)
+        ax.plot(thresholds_pr[:len(f2_scores)], f2_scores, 
+                label='F2-Score', color=PlottingUtils.COLORS[4], linestyle='-.', linewidth=1.5, alpha=0.8)
+        
+        # Add markers for optimal points
+        ax.scatter(optimal_threshold, max_f1_score, 
+                  marker='o', s=100, color='red', zorder=5, 
+                  label=f'Ótimo F1 ({max_f1_score:.3f}) @ thr={optimal_threshold:.3f}')
+        
+        ax.scatter(optimal_f05_threshold, max_f05_score, 
+                  marker='s', s=80, color=PlottingUtils.COLORS[3], zorder=5, 
+                  label=f'Ótimo F0.5 ({max_f05_score:.3f}) @ thr={optimal_f05_threshold:.3f}')
+        
+        ax.scatter(optimal_f2_threshold, max_f2_score, 
+                  marker='^', s=80, color=PlottingUtils.COLORS[4], zorder=5, 
+                  label=f'Ótimo F2 ({max_f2_score:.3f}) @ thr={optimal_f2_threshold:.3f}')
+        
+        # Add vertical lines for optimal thresholds (subtle)
+        ax.axvline(x=optimal_threshold, color='red', linestyle=':', alpha=0.3)
+        ax.axvline(x=optimal_f05_threshold, color=PlottingUtils.COLORS[3], linestyle=':', alpha=0.3)
+        ax.axvline(x=optimal_f2_threshold, color=PlottingUtils.COLORS[4], linestyle=':', alpha=0.3)
         
         ax.set_title(f'Ajuste de Threshold para {class_name}', fontsize=14)
         ax.set_xlabel('Threshold de Classificação', fontsize=12)
         ax.set_ylabel('Score', fontsize=12)
-        ax.legend(fontsize=10)
+        ax.legend(fontsize=9, loc='best', ncol=2)
         ax.grid(True, linestyle='--', alpha=0.6)
         ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
+        
+        # Add a text box with summary
+        textstr = f'F0.5: favorece Precision\nF1: balanceado\nF2: favorece Recall'
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=8,
+                verticalalignment='top', bbox=props)
+        
         PlottingUtils.save_plot(fig, output_dir, f"threshold_tuning_{class_name.replace(' ', '_').lower()}.png")
         
-        logger.info(f"🎯 Threshold ótimo para {class_name} (max F1): {optimal_threshold:.4f} (F1: {max_f1_score:.4f})")
+        logger.info(f"🎯 Thresholds ótimos para {class_name}:")
+        logger.info(f"   F0.5 (precision-focused): {optimal_f05_threshold:.4f} (F0.5: {max_f05_score:.4f})")
+        logger.info(f"   F1   (balanced):          {optimal_threshold:.4f} (F1: {max_f1_score:.4f})")
+        logger.info(f"   F2   (recall-focused):    {optimal_f2_threshold:.4f} (F2: {max_f2_score:.4f})")
+        
         return optimal_threshold
 
 class VisualizationSuite:
