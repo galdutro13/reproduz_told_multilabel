@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Fine-tuning BERT multi-label (ToLD-BR) - Versão Reestruturada
+Fine-tuning BERT multi-label (ToLD-BR) - Versão Reestruturada com Suporte a GPU
 
-Reimplementação modular usando princípios de separação de responsabilidades.
+Reimplementação modular usando princípios de separação de responsabilidades
+com detecção automática e otimização para GPU.
 
 Suporta:
+- Detecção automática de GPU/CPU
+- Otimizações específicas por dispositivo
+- Batch sizes adaptativos baseados na memória GPU
+- Precisão mista (FP16) automática
+- Múltiplas GPUs
 - BCEWithLogitsLoss padrão (baseline)
 - BCEWithLogitsLoss com pos_weight customizado
 - Focal Loss com alpha automático ou manual
 - Facilmente extensível para outras loss functions
 - Execução de múltiplas configurações via arquivo JSON
 
-Autor: Sistema Reestruturado
+Autor: Sistema Reestruturado com Suporte GPU
 Data: 2024
 """
 
@@ -19,10 +25,11 @@ import os
 import sys
 import argparse
 import logging
+import torch
 from typing import Optional
 
 # Configurar ambiente antes dos imports principais
-from src.config import setup_environment
+from src.config import setup_environment, USE_CUDA, DEVICE
 setup_environment()
 
 # Imports dos módulos
@@ -30,37 +37,67 @@ from src.config import ModelConfig, LossConfig, DATASET_PATH, SEED
 from src.utils import LoggingSetup, SystemInfo, Timer, validate_requirements
 from src.config_manager import BatchExecutor, create_simple_config_example
 from src.data import DataPersistence, calculate_class_weights
-from src.models import ModelFactory, ModelValidator
+from src.models import ModelFactory, ModelValidator, GPUMemoryManager
 from src.training import TrainingManager
 from src.metrics import DetailedMetricsAnalyzer, MetricsReporter
 from src.visualization import VisualizationSuite
 
 logger = logging.getLogger(__name__)
 
+def log_system_capabilities():
+    """Log detalhado das capacidades do sistema."""
+    logger.info("\n" + "="*80)
+    logger.info("🔍 CAPACIDADES DO SISTEMA")
+    logger.info("="*80)
+    
+    # Informações básicas do sistema
+    SystemInfo.log_system_info()
+    
+    # Informações específicas de GPU
+    if USE_CUDA:
+        logger.info("\n🚀 CONFIGURAÇÃO GPU:")
+        gpu_info = GPUMemoryManager.get_gpu_memory_info()
+        logger.info(f"  Dispositivo principal: {gpu_info['device_name']}")
+        logger.info(f"  Memória total: {gpu_info['total_memory_gb']:.1f} GB")
+        logger.info(f"  Memória livre: {gpu_info['free_memory_gb']:.1f} GB")
+        
+        if torch.cuda.device_count() > 1:
+            logger.info(f"  Múltiplas GPUs detectadas: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                name = torch.cuda.get_device_name(i)
+                memory = torch.cuda.get_device_properties(i).total_memory / 1e9
+                logger.info(f"    GPU {i}: {name} ({memory:.1f} GB)")
+    else:
+        logger.info("\n💻 CONFIGURAÇÃO CPU:")
+        logger.info("  GPU não detectada - usando CPU")
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """Cria parser de argumentos da linha de comando."""
     parser = argparse.ArgumentParser(
         description="""
-Fine-tuning BERT multi-label (ToLD-BR) - Versão Reestruturada
+Fine-tuning BERT multi-label (ToLD-BR) - Versão com Suporte GPU
 
-Reimplementação modular usando Hugging Face Transformers com separação
-de responsabilidades para máxima flexibilidade e manutenibilidade.
+Reimplementação modular com detecção automática de GPU/CPU e otimizações
+específicas para cada dispositivo.
 
 Exemplos de uso:
-  # Baseline (BCE padrão)
+  # Baseline com auto-detecção de GPU
   python main.py --train --validate
   
-  # Com pos_weight customizado
-  python main.py --train --pos-weight "7.75,1.47,1.95,12.30,6.66,11.75"
+  # Forçar uso de CPU mesmo com GPU disponível
+  python main.py --train --force-cpu
   
-  # Com Focal Loss
-  python main.py --train --use-focal-loss
+  # Usar batch size específico (substitui auto-detecção)
+  python main.py --train --batch-size 32
+  
+  # Com Focal Loss em GPU
+  python main.py --train --use-focal-loss --validate
   
   # Executar múltiplas configurações
   python main.py --config configurator.json
   
-  # Criar configuração de exemplo
-  python main.py --create-example-config
+  # Verificar compatibilidade GPU
+  python main.py --check-gpu
         """,
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -79,12 +116,22 @@ Exemplos de uso:
                        help='Nome do modelo HuggingFace')
     parser.add_argument('--epochs', type=int, default=3,
                        help='Número de épocas de treinamento')
-    parser.add_argument('--batch-size', type=int, default=8,
-                       help='Tamanho do batch')
+    parser.add_argument('--batch-size', type=int, 
+                       help='Tamanho do batch (auto-detectado se não especificado)')
     parser.add_argument('--learning-rate', type=float, default=4e-5,
                        help='Taxa de aprendizado')
     parser.add_argument('--max-seq-length', type=int, default=128,
                        help='Comprimento máximo das sequências')
+    
+    # Configurações de dispositivo
+    parser.add_argument('--force-cpu', action='store_true',
+                       help='Força uso de CPU mesmo com GPU disponível')
+    parser.add_argument('--gpu-id', type=int, default=0,
+                       help='ID da GPU para usar (padrão: 0)')
+    parser.add_argument('--fp16', action='store_true',
+                       help='Força uso de precisão mista FP16')
+    parser.add_argument('--no-fp16', action='store_true',
+                       help='Desabilita precisão mista FP16')
     
     # Configurações de loss
     parser.add_argument('--pos-weight', type=str, 
@@ -103,10 +150,12 @@ Exemplos de uso:
                        help='Diretório de saída')
     
     # Utilitários
+    parser.add_argument('--check-gpu', action='store_true',
+                       help='Verifica compatibilidade e performance da GPU')
     parser.add_argument('--create-example-config', action='store_true',
                        help='Cria arquivo de configuração de exemplo')
     parser.add_argument('--system-info', action='store_true',
-                       help='Mostra informações do sistema')
+                       help='Mostra informações detalhadas do sistema')
     parser.add_argument('--log-level', type=str, default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help='Nível de logging')
@@ -115,6 +164,28 @@ Exemplos de uso:
     
     return parser
 
+def setup_device_from_args(args):
+    """Configura dispositivo baseado nos argumentos."""
+    global USE_CUDA, DEVICE
+    
+    if args.force_cpu:
+        USE_CUDA = False
+        DEVICE = "cpu"
+        logger.info("💻 Forçando uso de CPU conforme solicitado")
+    elif torch.cuda.is_available():
+        if args.gpu_id >= torch.cuda.device_count():
+            logger.error(f"❌ GPU {args.gpu_id} não existe. GPUs disponíveis: 0-{torch.cuda.device_count()-1}")
+            sys.exit(1)
+        
+        USE_CUDA = True
+        DEVICE = f"cuda:{args.gpu_id}"
+        torch.cuda.set_device(args.gpu_id)
+        logger.info(f"🚀 Usando GPU {args.gpu_id}: {torch.cuda.get_device_name(args.gpu_id)}")
+    else:
+        USE_CUDA = False
+        DEVICE = "cpu"
+        logger.info("💻 GPU não disponível - usando CPU")
+
 def setup_logging_from_args(args):
     """Configura logging baseado nos argumentos."""
     LoggingSetup.setup_logging(
@@ -122,20 +193,69 @@ def setup_logging_from_args(args):
         log_file=args.log_file
     )
 
+def run_gpu_check():
+    """Executa verificação de GPU."""
+    logger.info("\n🔍 EXECUTANDO VERIFICAÇÃO DE GPU")
+    logger.info("="*50)
+    
+    # Importar e executar script de verificação
+    try:
+        import subprocess
+        result = subprocess.run([sys.executable, "check_gpu_compatibility.py"], 
+                              capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print(result.stdout)
+        else:
+            print(result.stderr)
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao executar verificação de GPU: {e}")
+        logger.info("Execute manualmente: python check_gpu_compatibility.py")
+
 def run_single_training(args) -> None:
-    """Executa treinamento único baseado em argumentos."""
+    """Executa treinamento único baseado em argumentos com suporte a GPU."""
     logger.info("\n🚀 MODO DE TREINAMENTO ÚNICO")
     logger.info("="*50)
+    
+    # Log memória inicial se GPU
+    if USE_CUDA:
+        GPUMemoryManager.log_gpu_memory_usage("inicial")
+    
+    # Determinar configurações automáticas baseadas no dispositivo
+    auto_batch_size = None
+    auto_fp16 = USE_CUDA
+    
+    # Sobrescrever com argumentos do usuário se fornecidos
+    if args.batch_size:
+        auto_batch_size = args.batch_size
+    elif USE_CUDA:
+        from src.config import get_optimal_batch_size
+        auto_batch_size = get_optimal_batch_size(args.model_name, args.max_seq_length)
+        logger.info(f"🎯 Batch size auto-detectado: {auto_batch_size}")
+    else:
+        auto_batch_size = 8  # Conservador para CPU
+    
+    # Configuração FP16
+    if args.fp16:
+        auto_fp16 = True
+    elif args.no_fp16:
+        auto_fp16 = False
+    
+    logger.info(f"⚡ Precisão mista (FP16): {'Ativada' if auto_fp16 else 'Desativada'}")
     
     # Criar configurações
     model_config = ModelConfig(
         model_name=args.model_name,
         num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
+        per_device_train_batch_size=auto_batch_size,
+        per_device_eval_batch_size=auto_batch_size * 2,
         learning_rate=args.learning_rate,
         max_seq_length=args.max_seq_length,
         evaluate_during_training=args.validate,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        use_cuda=USE_CUDA,
+        fp16=auto_fp16,
     )
     
     loss_config = LossConfig(
@@ -159,20 +279,37 @@ def run_single_training(args) -> None:
     with Timer("Carregamento de dados"):
         train_df, val_df, test_df = DataPersistence.load_or_create_splits(args.dataset)
     
+    # Log uso de memória após carregamento de dados
+    if USE_CUDA:
+        GPUMemoryManager.log_gpu_memory_usage("após carregamento de dados")
+    
     # Criar modelo
-    with Timer("Criação do modelo"):
+    with Timer("Criação e configuração do modelo"):
         model, tokenizer = ModelFactory.create_model_and_tokenizer(model_config)
         ModelValidator.validate_model_config(model, 6)  # 6 classes
         ModelValidator.test_model_forward(model, tokenizer)
+    
+    # Log uso de memória após criação do modelo
+    if USE_CUDA:
+        GPUMemoryManager.log_gpu_memory_usage("após criação do modelo")
     
     # Calcular alpha weights se necessário
     if loss_config.use_focal_loss:
         logger.info("🧮 Calculando pesos alpha para Focal Loss...")
         loss_config.focal_alpha_weights = calculate_class_weights(train_df)
     
+    # Configurar para múltiplas GPUs se disponível
+    if USE_CUDA and torch.cuda.device_count() > 1:
+        from src.models import MultiGPUManager
+        model = MultiGPUManager.setup_multi_gpu(model)
+    
     # Executar treinamento
     with Timer("Treinamento"):
-        training_manager = TrainingManager(model_config, loss_config)
+        training_manager = TrainingManager(
+            model_config, 
+            loss_config, 
+            use_contiguity_fix=USE_CUDA  # Usar correção de contiguidade para GPU
+        )
         
         # Criar datasets
         from src.data import MultiLabelDataset
@@ -203,6 +340,10 @@ def run_single_training(args) -> None:
         trainer = training_manager.setup_trainer(model, tokenizer, train_dataset, val_dataset)
         train_result, training_history = training_manager.train()
     
+    # Log uso de memória após treinamento
+    if USE_CUDA:
+        GPUMemoryManager.log_gpu_memory_usage("após treinamento")
+    
     # Avaliar
     with Timer("Avaliação"):
         test_metrics, test_probs = training_manager.evaluate(test_dataset)
@@ -213,7 +354,6 @@ def run_single_training(args) -> None:
     
     # Análise detalhada
     with Timer("Análise detalhada"):
-        import torch
         import numpy as np
         
         y_true = torch.stack([test_dataset[i]['labels'] for i in range(len(test_dataset))]).numpy()
@@ -240,10 +380,15 @@ def run_single_training(args) -> None:
             detailed_metrics['per_class_metrics']
         )
     
+    # Log final de memória
+    if USE_CUDA:
+        GPUMemoryManager.log_gpu_memory_usage("final")
+        GPUMemoryManager.clear_gpu_cache()
+    
     logger.info("\n✅ Treinamento único concluído com sucesso!")
 
 def run_batch_execution(args) -> None:
-    """Executa múltiplas configurações de um arquivo JSON."""
+    """Executa múltiplas configurações de um arquivo JSON com suporte a GPU."""
     logger.info("\n🚀 MODO DE EXECUÇÃO EM LOTE")
     logger.info("="*50)
     
@@ -274,9 +419,13 @@ def run_batch_execution(args) -> None:
         best_id = best_model.get('instance_id', 'N/A')
         
         logger.info(f"🏆 Melhor modelo: {best_id} (F1-Macro: {best_f1:.4f})")
+    
+    # Limpeza final de memória
+    if USE_CUDA:
+        GPUMemoryManager.clear_gpu_cache()
 
 def run_model_testing(args) -> None:
-    """Executa teste de modelo salvo."""
+    """Executa teste de modelo salvo com suporte a GPU."""
     logger.info("\n🧪 MODO DE TESTE")
     logger.info("="*50)
     
@@ -285,15 +434,29 @@ def run_model_testing(args) -> None:
         logger.error("❌ Modelo não encontrado. Execute o treinamento primeiro com --train")
         sys.exit(1)
     
+    # Log memória inicial se GPU
+    if USE_CUDA:
+        GPUMemoryManager.log_gpu_memory_usage("antes do carregamento do modelo")
+    
     # Carregar modelo
     from src.training import ModelCheckpointer
     
     try:
         model, tokenizer, metadata = ModelCheckpointer.load_checkpoint(args.output_dir)
+        
+        # Mover modelo para GPU se disponível
+        if USE_CUDA:
+            model = model.to(DEVICE)
+            logger.info(f"🚀 Modelo carregado e movido para: {DEVICE}")
+        
         logger.info("✅ Modelo carregado com sucesso")
         
         if metadata:
             logger.info(f"📊 Modelo salvo em: {metadata.get('saved_at', 'N/A')}")
+        
+        # Log memória após carregamento
+        if USE_CUDA:
+            GPUMemoryManager.log_gpu_memory_usage("após carregamento do modelo")
         
         # Carregar dados de teste
         _, _, test_df = DataPersistence.load_or_create_splits(args.dataset)
@@ -308,7 +471,11 @@ def run_model_testing(args) -> None:
         )
         
         # Avaliar
-        config = ModelConfig(output_dir=args.output_dir)
+        config = ModelConfig(
+            output_dir=args.output_dir,
+            use_cuda=USE_CUDA,
+            fp16=USE_CUDA and not args.no_fp16
+        )
         training_manager = TrainingManager(config)
         training_manager.trainer = training_manager.setup_trainer(
             model, tokenizer, test_dataset
@@ -316,6 +483,10 @@ def run_model_testing(args) -> None:
         
         test_metrics, test_probs = training_manager.evaluate(test_dataset)
         MetricsReporter.log_metrics_summary(test_metrics, "Resultados do Teste")
+        
+        # Limpeza de memória
+        if USE_CUDA:
+            GPUMemoryManager.clear_gpu_cache()
         
     except Exception as e:
         logger.error(f"❌ Erro ao testar modelo: {e}")
@@ -331,8 +502,11 @@ def main():
     
     # Header
     logger.info("\n" + "="*80)
-    logger.info("🤖 BERT MULTI-LABEL FINE-TUNING - VERSÃO REESTRUTURADA")
+    logger.info("🤖 BERT MULTI-LABEL FINE-TUNING - VERSÃO COM SUPORTE GPU")
     logger.info("="*80)
+    
+    # Configurar dispositivo baseado nos argumentos
+    setup_device_from_args(args)
     
     # Validar dependências
     if not validate_requirements():
@@ -340,8 +514,12 @@ def main():
     
     # Executar comando específico
     try:
+        if args.check_gpu:
+            run_gpu_check()
+            return
+        
         if args.system_info:
-            SystemInfo.log_system_info()
+            log_system_capabilities()
             return
         
         if args.create_example_config:
@@ -350,7 +528,24 @@ def main():
             return
         
         # Log informações do sistema
-        SystemInfo.log_system_info()
+        log_system_capabilities()
+        
+        # Aviso sobre configurações de GPU
+        if USE_CUDA:
+            logger.info("\n🔥 CONFIGURAÇÕES DE GPU ATIVAS:")
+            logger.info(f"  Dispositivo: {DEVICE}")
+            logger.info(f"  Precisão mista (FP16): {'Ativada' if not args.no_fp16 else 'Desativada'}")
+            
+            if torch.cuda.device_count() > 1:
+                logger.info(f"  Múltiplas GPUs: {torch.cuda.device_count()} disponíveis")
+            
+            # Mostrar configurações recomendadas
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            if gpu_memory < 8:
+                logger.warning("⚠️ GPU com pouca memória detectada. Considere:")
+                logger.warning("  - Reduzir batch_size")
+                logger.warning("  - Usar --fp16 para economia de memória")
+                logger.warning("  - Reduzir max_seq_length se possível")
         
         # Modos de execução
         if args.config:
@@ -362,15 +557,25 @@ def main():
         else:
             parser.print_help()
             logger.warning("⚠️ Nenhuma ação especificada. Use --help para ver as opções.")
+            logger.info("\n💡 Dicas rápidas:")
+            logger.info("  - Execute 'python main.py --check-gpu' para verificar GPU")
+            logger.info("  - Execute 'python main.py --train --validate' para treinamento básico")
+            logger.info(f"  - Dispositivo detectado: {DEVICE}")
     
     except KeyboardInterrupt:
         logger.info("\n⏹️ Execução interrompida pelo usuário")
+        if USE_CUDA:
+            GPUMemoryManager.clear_gpu_cache()
         sys.exit(0)
     except Exception as e:
         logger.error(f"\n❌ Erro fatal: {e}")
         if args.log_level == "DEBUG":
             import traceback
             traceback.print_exc()
+        
+        # Limpeza de memória em caso de erro
+        if USE_CUDA:
+            GPUMemoryManager.clear_gpu_cache()
         sys.exit(1)
     
     logger.info("\n🎉 Execução concluída!")

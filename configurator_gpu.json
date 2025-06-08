@@ -9,7 +9,9 @@
                 "epochs": 5,
                 "max_seq_length": 128,
                 "do_lower_case": false,
-                "use_focal_loss": false
+                "use_focal_loss": false,
+                "batch_size": 32,
+                "learning_rate": 5e-5
             }
         },
         {
@@ -21,7 +23,9 @@
                 "epochs": 5,
                 "max_seq_length": 128,
                 "do_lower_case": false,
-                "use_focal_loss": true
+                "use_focal_loss": true,
+                "batch_size": 28,
+                "learning_rate": 4e-5
             }
         },
         {
@@ -41,7 +45,9 @@
                     12.30,
                     6.66,
                     11.75
-                ]
+                ],
+                "batch_size": 30,
+                "learning_rate": 5e-5
             }
         },
         {
@@ -53,7 +59,9 @@
                 "epochs": 5,
                 "max_seq_length": 128,
                 "do_lower_case": true,
-                "use_focal_loss": false
+                "use_focal_loss": false,
+                "batch_size": 32,
+                "learning_rate": 5e-5
             }
         },
         {
@@ -65,7 +73,9 @@
                 "epochs": 5,
                 "max_seq_length": 128,
                 "do_lower_case": true,
-                "use_focal_loss": true
+                "use_focal_loss": true,
+                "batch_size": 28,
+                "learning_rate": 4e-5
             }
         },
         {
@@ -85,7 +95,9 @@
                     12.30,
                     6.66,
                     11.75
-                ]
+                ],
+                "batch_size": 30,
+                "learning_rate": 5e-5
             }
         },
         {
@@ -96,24 +108,29 @@
                 "validate": true,
                 "epochs": 5,
                 "max_seq_length": 128,
-                "do_lower_case": false
+                "do_lower_case": false,
+                "use_focal_loss": false,
+                "batch_size": 32,
+                "learning_rate": 5e-5
             }
         },
         {
             "id": "I008",
-            "name": "testing with bertinbau",
+            "name": "testing with bertinbau and focal loss",
             "parameters": {
                 "model_name": "neuralmind/bert-base-portuguese-cased",
                 "validate": true,
                 "epochs": 5,
                 "max_seq_length": 128,
                 "do_lower_case": false,
-                "use_focal_loss": true
+                "use_focal_loss": true,
+                "batch_size": 28,
+                "learning_rate": 4e-5
             }
         },
         {
             "id": "I009",
-            "name": "testing with bertinbau",
+            "name": "testing with bertinbau and pos_weight",
             "parameters": {
                 "model_name": "neuralmind/bert-base-portuguese-cased",
                 "validate": true,
@@ -128,7 +145,9 @@
                     12.30,
                     6.66,
                     11.75
-                ]
+                ],
+                "batch_size": 30,
+                "learning_rate": 5e-5
             }
         }
     ]
