@@ -34,7 +34,14 @@
                 "max_seq_length": 128,
                 "do_lower_case": false,
                 "use_focal_loss": false,
-                "pos_weight": [7.75,1.47,1.95,12.30,6.66,11.75]
+                "pos_weight": [
+                    7.75,
+                    1.47,
+                    1.95,
+                    12.30,
+                    6.66,
+                    11.75
+                ]
             }
         },
         {
@@ -59,6 +66,69 @@
                 "max_seq_length": 128,
                 "do_lower_case": true,
                 "use_focal_loss": true
+            }
+        },
+        {
+            "id": "I006",
+            "name": "testing with bertabaporu and pos_weight",
+            "parameters": {
+                "model_name": "pablocosta/bertabaporu-base-uncased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": true,
+                "use_focal_loss": false,
+                "pos_weight": [
+                    7.75,
+                    1.47,
+                    1.95,
+                    12.30,
+                    6.66,
+                    11.75
+                ]
+            }
+        },
+        {
+            "id": "I007",
+            "name": "testing with bertinbau",
+            "parameters": {
+                "model_name": "neuralmind/bert-base-portuguese-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false
+            }
+        },
+        {
+            "id": "I008",
+            "name": "testing with bertinbau",
+            "parameters": {
+                "model_name": "neuralmind/bert-base-portuguese-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false,
+                "use_focal_loss": true
+            }
+        },
+        {
+            "id": "I009",
+            "name": "testing with bertinbau",
+            "parameters": {
+                "model_name": "neuralmind/bert-base-portuguese-cased",
+                "validate": true,
+                "epochs": 3,
+                "max_seq_length": 128,
+                "do_lower_case": false,
+                "use_focal_loss": false,
+                "pos_weight": [
+                    7.75,
+                    1.47,
+                    1.95,
+                    12.30,
+                    6.66,
+                    11.75
+                ]
             }
         }
     ]

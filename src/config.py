@@ -65,7 +65,7 @@ class ModelConfig:
     cache_dir: str = "cache_bert/"
     best_model_dir: str = "outputs/best_model"
     evaluate_during_training: bool = True
-    evaluation_strategy: str = "steps"
+    eval_strategy: str = "steps"  # ← MUDANÇA: evaluation_strategy → eval_strategy
     eval_steps: int = 350
     save_steps: int = 350
     logging_steps: int = 50
@@ -94,7 +94,7 @@ class ModelConfig:
             logging_dir=os.path.join(self.output_dir, "runs"),
             logging_steps=self.logging_steps,
             logging_first_step=self.logging_first_step,
-            evaluation_strategy=self.evaluation_strategy,
+            eval_strategy=self.eval_strategy,  # ← MUDANÇA: evaluation_strategy → eval_strategy
             eval_steps=self.eval_steps,
             save_steps=self.save_steps,
             save_total_limit=self.save_total_limit,
