@@ -171,6 +171,10 @@ def setup_device_from_args(args):
     if args.force_cpu:
         USE_CUDA = False
         DEVICE = "cpu"
+        # CORREÇÃO: Aplicar mudanças no módulo config também
+        import src.config as config_module
+        config_module.USE_CUDA = False
+        config_module.DEVICE = "cpu"
         logger.info("💻 Forçando uso de CPU conforme solicitado")
     elif torch.cuda.is_available():
         if args.gpu_id >= torch.cuda.device_count():
@@ -180,10 +184,18 @@ def setup_device_from_args(args):
         USE_CUDA = True
         DEVICE = f"cuda:{args.gpu_id}"
         torch.cuda.set_device(args.gpu_id)
+        # CORREÇÃO: Aplicar mudanças no módulo config também
+        import src.config as config_module
+        config_module.USE_CUDA = True
+        config_module.DEVICE = DEVICE
         logger.info(f"🚀 Usando GPU {args.gpu_id}: {torch.cuda.get_device_name(args.gpu_id)}")
     else:
         USE_CUDA = False
         DEVICE = "cpu"
+        # CORREÇÃO: Aplicar mudanças no módulo config também
+        import src.config as config_module
+        config_module.USE_CUDA = False
+        config_module.DEVICE = "cpu"
         logger.info("💻 GPU não disponível - usando CPU")
 
 def setup_logging_from_args(args):

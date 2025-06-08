@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Criação e configuração de modelos BERT para classificação multi-label com suporte a GPU.
-VERSÃO CORRIGIDA - Remove conflito entre torch.compile e FP16
+VERSÃO ULTRA-ESTÁVEL - Sem torch.compile para máxima compatibilidade
 """
 
 import torch
@@ -188,13 +188,13 @@ class ModelFactory:
         return model, tokenizer
 
 class ModelOptimizer:
-    """Classe para otimizações do modelo com suporte a GPU."""
+    """Classe para otimizações do modelo com suporte a GPU - VERSÃO ESTÁVEL."""
     
     @staticmethod
     def optimize_model(model: PreTrainedModel, config: ModelConfig) -> PreTrainedModel:
         """
         Aplica otimizações ao modelo baseado no dispositivo disponível.
-        VERSÃO CORRIGIDA: Evita conflito entre torch.compile e FP16
+        VERSÃO ESTÁVEL: Sem torch.compile para máxima compatibilidade
         
         Args:
             model: Modelo a ser otimizado
@@ -210,36 +210,30 @@ class ModelOptimizer:
     
     @staticmethod
     def _optimize_for_gpu(model: PreTrainedModel, config: ModelConfig) -> PreTrainedModel:
-        """Otimizações específicas para GPU - VERSÃO CORRIGIDA."""
-        logger.info("🚀 Aplicando otimizações para GPU...")
+        """Otimizações específicas para GPU - VERSÃO ESTÁVEL."""
+        logger.info("🚀 Aplicando otimizações para GPU (modo estável)...")
         
         # ===================================================================
-        # CORREÇÃO: Evitar torch.compile quando FP16 está ativo
+        # VERSÃO ESTÁVEL: Sem torch.compile - apenas otimizações básicas
         # ===================================================================
         
         if config.fp16:
-            logger.info("⚡ FP16 ativo - torch.compile desabilitado para evitar conflitos")
-            logger.info("💾 Gradient checkpointing ativado para economia de memória")
-            
-            # Ativar gradient checkpointing para economia de memória com FP16
-            if hasattr(model, 'gradient_checkpointing_enable'):
-                model.gradient_checkpointing_enable()
-                
+            logger.info("⚡ FP16 ativo - otimizações de memória aplicadas")
         else:
-            # Usar torch.compile apenas quando FP16 está desabilitado
-            if hasattr(torch, 'compile'):
-                try:
-                    optimized_model = torch.compile(
-                        model,
-                        mode="reduce-overhead",
-                        dynamic=True,  # Mudança: dynamic=True para lidar com batch sizes variáveis
-                        fullgraph=False
-                    )
-                    logger.info("🛠️ torch.compile ativado (FP16 desabilitado)")
-                    return optimized_model
-                except Exception as e:
-                    logger.warning(f"⚠️ torch.compile falhou: {e}")
+            logger.info("📊 FP32 - priorizando estabilidade sobre velocidade")
         
+        # Ativar gradient checkpointing para economia de memória
+        if hasattr(model, 'gradient_checkpointing_enable'):
+            model.gradient_checkpointing_enable()
+            logger.info("💾 Gradient checkpointing ativado")
+        
+        # Configurações básicas para estabilidade
+        if hasattr(model.config, 'output_attentions'):
+            model.config.output_attentions = False
+        if hasattr(model.config, 'output_hidden_states'):
+            model.config.output_hidden_states = False
+        
+        logger.info("✅ Otimizações estáveis aplicadas (sem torch.compile)")
         return model
     
     @staticmethod
