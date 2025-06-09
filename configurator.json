@@ -2,7 +2,7 @@
     "instances": [
         {
             "id": "I001",
-            "name": "running baseline training with focal loss",
+            "name": "running baseline training",
             "parameters": {
                 "model_name": "google-bert/bert-base-multilingual-cased",
                 "validate": true,

@@ -1,0 +1,36 @@
+RELATÓRIO FINAL - ANÁLISE MULTI-MODELO BERT
+============================================================
+
+RESUMO EXECUTIVO:
+Melhor modelo geral: BertAbaporu com PosWeight
+Macro F1-Score: 0.5628
+Average Precision: 0.3632
+
+TOP 5 MODELOS:
+----------------------------------------
+1. BertAbaporu (PosWeight) - F1: 0.5628
+2. Bertimbau (PosWeight) - F1: 0.5593
+3. Bertimbau (Default) - F1: 0.5439
+4. BertAbaporu (Default) - F1: 0.4982
+5. Bertimbau (Focal) - F1: 0.4682
+
+PERFORMANCE POR MODELO BASE:
+----------------------------------------
+Bertimbau: Média=0.5238 | Melhor=0.5593
+BertAbaporu: Média=0.4921 | Melhor=0.5628
+BERT: Média=0.4036 | Melhor=0.4508
+
+PERFORMANCE POR LOSS FUNCTION:
+----------------------------------------
+PosWeight: Média=0.5243 | Melhor=0.5628
+Default: Média=0.4805 | Melhor=0.5439
+Focal: Média=0.4146 | Melhor=0.4682
+
+RECOMENDAÇÕES:
+----------------------------------------
+1. Use BertAbaporu com PosWeight para máxima performance
+2. Para BERT: use PosWeight (F1: 0.4508)
+2. Para Bertimbau: use PosWeight (F1: 0.5593)
+2. Para BertAbaporu: use PosWeight (F1: 0.5628)
+3. Foque em melhorar classes problemáticas (racism, xenophobia)
+4. Implemente early stopping para evitar overfitting
